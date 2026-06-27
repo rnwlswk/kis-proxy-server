@@ -7,8 +7,8 @@ app = Flask(__name__)
 CORS(app)
 
 # 환경변수에서 API 정보만 가져옵니다.
-API_KEY = os.environ.get("KIS_API_KEY", "PSyS7Xwyb30LTpwJwsECgksK7Yy1WPKqYwG9")
-API_SECRET = os.environ.get("KIS_API_SECRET", "2NuIqBOBYXN6G2e3wNpPH5t1ACmm7AynBmwAgfESufkcIzuDyaZ3zHRgby0k/NXYPzdNRC1kCBrQkN1fDN41475Y3t2QK4DEGbCwh1jGCvZunCtXiZcoopBtNIwdNtyJCrKorU4RTtAActapzLpAj4xHmdxQshDytlXVm2bDyGYFT6GZyBQ=")
+API_KEY = os.environ.get("KIS_API_KEY", "여기에_앱키를_넣으세요")
+API_SECRET = os.environ.get("KIS_API_SECRET", "여기에_시크릿을_넣으세요")
 BASE_URL = "https://openapi.koreainvestment.com:9443"
 
 # 토큰을 메모리에 잠시 저장하는 변수
