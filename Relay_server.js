@@ -16,21 +16,27 @@ let tokenExpiry = null;
 // 한국투자증권 API 접근 토큰 발급
 async function getAccessToken() {
     const now = new Date().getTime();
+    
+    // 토큰이 존재하고 만료 전이라면 캐싱된 토큰 반환
     if (cachedToken && tokenExpiry && now < tokenExpiry) {
         return cachedToken;
     }
+    
     try {
         const response = await axios.post(`${BASE_URL}/oauth2/tokenP`, {
             grant_type: "client_credentials",
             appkey: APP_KEY,
             appsecret: APP_SECRET
         });
+        
         cachedToken = response.data.access_token;
-        tokenExpiry = now + (12 * 60 * 60 * 1000);
+        // KIS 토큰 유효기간은 발급 후 1일(24시간)이나, 안전하게 12시간으로 갱신
+        tokenExpiry = now + (12 * 60 * 60 * 1000); 
         console.log("새로운 KIS API 토큰이 발급되었습니다.");
+        
         return cachedToken;
     } catch (error) {
-        console.error("토큰 발급 실패:", error.response ? error.response.data : error.message);
+        console.error("토큰 발급 실패:", error.response?.data || error.message);
         throw new Error("토큰 발급 실패");
     }
 }
@@ -38,34 +44,38 @@ async function getAccessToken() {
 // 통합 시세 조회 엔드포인트
 app.get('/api/kis-data/:ticker', async (req, res) => {
     const { ticker } = req.params;
+    
     try {
         const token = await getAccessToken();
 
-        // [핵심 변경] 금 현물(M04020000)은 일반 주식 API, ETF 종목들은 ETF 전용 API 사용
+        // 금 현물(M04020000)은 일반 주식 API, ETF 종목들은 ETF 전용 API 사용
         const isGold = (ticker === 'M04020000');
         const tr_id = isGold ? "FHKST01010100" : "FHPST02400000";
-        const endpoint = isGold ? "/uapi/domestic-stock/v1/quotations/inquire-price" : "/uapi/etfetn/v1/quotations/inquire-price";
+        const endpoint = isGold 
+            ? "/uapi/domestic-stock/v1/quotations/inquire-price" 
+            : "/uapi/etfetn/v1/quotations/inquire-price";
 
         const response = await axios.get(`${BASE_URL}${endpoint}`, {
             headers: {
-                "content-type": "application/json",
+                "content-type": "application/json; charset=utf-8",
                 "authorization": `Bearer ${token}`,
-                "appKey": APP_KEY,
-                "appSecret": APP_SECRET,
+                "appkey": APP_KEY,       // [수정] 소문자로 변경
+                "appsecret": APP_SECRET, // [수정] 소문자로 변경
                 "tr_id": tr_id
             },
             params: {
-                "fid_cond_mrkt_div_code": "J",
-                "fid_input_iscd": ticker
+                "FID_COND_MRKT_DIV_CODE": "J", // [수정] 쿼리 파라미터는 대문자 권장
+                "FID_INPUT_ISCD": ticker       // [수정] 쿼리 파라미터는 대문자 권장
             }
         });
 
+        // 프론트엔드로 바로 전달
         res.json(response.data);
     } catch (error) {
-        console.error(`[${ticker}] 통신 에러:`, error.response ? error.response.data : error.message);
+        console.error(`[${ticker}] 통신 에러:`, error.response?.data || error.message);
         res.status(500).json({ 
             error: "API 통신 중 오류가 발생했습니다.",
-            details: error.response ? error.response.data : error.message
+            details: error.response?.data || error.message
         });
     }
 });
