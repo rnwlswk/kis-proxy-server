@@ -59,6 +59,7 @@ app.get('/api/kis-data/:ticker', async (req, res) => {
                 "FID_COND_MRKT_DIV_CODE": "J",
                 "FID_INPUT_ISCD": ticker
             }
+            console.log(JSON.stringify(response.data, null, 2));
         });
         res.json(response.data);
     } catch (error) {
@@ -66,7 +67,7 @@ app.get('/api/kis-data/:ticker', async (req, res) => {
         res.status(500).json({ error: "현재가 통신 오류", details: error.message });
     }
 });
-console.log(JSON.stringify(response.data, null, 2));
+
 // [API 2] 예탁원 배당일정 (배당금, 배당률, 기준일) 엔드포인트
 app.get('/api/kis-dividend/:ticker', async (req, res) => {
     const { ticker } = req.params;
