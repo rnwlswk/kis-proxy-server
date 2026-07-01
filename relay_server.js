@@ -59,8 +59,8 @@ app.get('/api/kis-data/:ticker', async (req, res) => {
                 "FID_COND_MRKT_DIV_CODE": "J",
                 "FID_INPUT_ISCD": ticker
             }
-            console.log(JSON.stringify(response.data, null, 2));
         });
+        console.log(JSON.stringify(response.data, null, 2));
         res.json(response.data);
     } catch (error) {
         console.error(`[${ticker}] 현재가 에러:`, error.response?.data || error.message);
