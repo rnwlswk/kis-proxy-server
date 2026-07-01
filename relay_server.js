@@ -60,6 +60,7 @@ app.get('/api/kis-data/:ticker', async (req, res) => {
                 "FID_INPUT_ISCD": ticker
             }
         });
+        console.log("=== 배당 API 응답 ===");
         console.log(JSON.stringify(response.data, null, 2));
         res.json(response.data);
     } catch (error) {
