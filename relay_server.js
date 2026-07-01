@@ -60,8 +60,6 @@ app.get('/api/kis-data/:ticker', async (req, res) => {
                 "FID_INPUT_ISCD": ticker
             }
         });
-        console.log("=== 배당 API 응답 ===");
-        console.log(JSON.stringify(response.data, null, 2));
         res.json(response.data);
     } catch (error) {
         console.error(`[${ticker}] 현재가 에러:`, error.response?.data || error.message);
@@ -96,7 +94,8 @@ app.get('/api/kis-dividend/:ticker', async (req, res) => {
                 "FID_INPUT_DATE_2": formatDt(today)
             }
         });
-
+        console.log("=== 배당 API 응답 ===");
+        console.log(JSON.stringify(response.data, null, 2));
         // 응답 데이터에서 해당 ETF의 가장 최근 배당정보 1개를 추출합니다
         let latestDiv = null;
         if (response.data && response.data.output && Array.isArray(response.data.output)) {
