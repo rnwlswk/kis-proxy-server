@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+console.log(JSON.stringify(response.data, null, 2));
 const cors = require('cors');
 
 const app = express();
