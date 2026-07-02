@@ -9,78 +9,63 @@ const APP_KEY = process.env.KIS_API_KEY;
 const APP_SECRET = process.env.KIS_API_SECRET;
 const BASE_URL = "https://openapi.koreainvestment.com:9443";
 
-let cachedToken = null;
-let tokenExpiry = null;
+let accessToken = "";
+let expireTime = 0;
 
-// =========================
+//=====================================================
 // Access Token
-// =========================
+//=====================================================
+
 async function getAccessToken() {
-    const now = Date.now();
 
-    if (cachedToken && tokenExpiry && now < tokenExpiry) {
-        return cachedToken;
+    if (accessToken && Date.now() < expireTime) {
+        return accessToken;
     }
 
-    try {
-        const response = await axios.post(
-            `${BASE_URL}/oauth2/tokenP`,
-            {
-                grant_type: "client_credentials",
-                appkey: APP_KEY,
-                appsecret: APP_SECRET
-            },
-            {
-                headers: {
-                    "content-type": "application/json"
-                }
+    const { data } = await axios.post(
+        `${BASE_URL}/oauth2/tokenP`,
+        {
+            grant_type: "client_credentials",
+            appkey: APP_KEY,
+            appsecret: APP_SECRET
+        },
+        {
+            headers: {
+                "content-type": "application/json"
             }
-        );
+        }
+    );
 
-        cachedToken = response.data.access_token;
-        tokenExpiry = now + (11 * 60 * 60 * 1000);
+    accessToken = data.access_token;
 
-        console.log("새로운 KIS API 토큰 발급 완료.");
+    expireTime = Date.now() + 1000 * 60 * 60 * 11;
 
-        return cachedToken;
+    console.log("KIS Token 재발급");
 
-    } catch (err) {
-
-        console.error(err.response?.data || err.message);
-        throw err;
-
-    }
+    return accessToken;
 }
 
-// =========================
-// 현재가 API
-// =========================
+//=====================================================
+// 현재가
+//=====================================================
+
 app.get("/api/kis-data/:ticker", async (req, res) => {
 
     try {
 
         const ticker = req.params.ticker;
+
         const token = await getAccessToken();
 
-        const isGold = ticker === "M04020000";
-
-        const tr_id = isGold
-            ? "FHKST01010100"
-            : "FHPST02400000";
-
-        const endpoint = isGold
-            ? "/uapi/domestic-stock/v1/quotations/inquire-price"
-            : "/uapi/etfetn/v1/quotations/inquire-price";
-
         const response = await axios.get(
-            `${BASE_URL}${endpoint}`,
+            `${BASE_URL}/uapi/etfetn/v1/quotations/inquire-price`,
             {
                 headers: {
-                    "content-type": "application/json; charset=utf-8",
                     authorization: `Bearer ${token}`,
                     appkey: APP_KEY,
                     appsecret: APP_SECRET,
-                    tr_id: tr_id
+                    tr_id: "FHPST02400000",
+                    "content-type": "application/json; charset=utf-8"
                 },
                 params: {
                     FID_COND_MRKT_DIV_CODE: "J",
@@ -91,21 +76,20 @@ app.get("/api/kis-data/:ticker", async (req, res) => {
 
         res.json(response.data);
 
-    } catch (err) {
+    } catch (e) {
 
-        console.error(err.response?.data || err.message);
+        console.log(e.response?.data || e.message);
 
-        res.status(500).json({
-            error: "현재가 조회 실패"
-        });
+        res.status(500).json(e.response?.data || { error: e.message });
 
     }
 
 });
 
-// =========================
-// 배당 API
-// =========================
+//=====================================================
+// 배당
+//=====================================================
+
 app.get("/api/kis-dividend/:ticker", async (req, res) => {
 
     try {
@@ -116,10 +100,11 @@ app.get("/api/kis-dividend/:ticker", async (req, res) => {
 
         const today = new Date();
 
-        const oneYearAgo = new Date();
-        oneYearAgo.setFullYear(today.getFullYear() - 1);
+        const before = new Date();
 
-        const format = (d) =>
+        before.setFullYear(today.getFullYear() - 1);
+
+        const format = d =>
             d.getFullYear() +
             String(d.getMonth() + 1).padStart(2, "0") +
             String(d.getDate()).padStart(2, "0");
@@ -128,12 +113,12 @@ app.get("/api/kis-dividend/:ticker", async (req, res) => {
             `${BASE_URL}/uapi/domestic-stock/v1/ksdinfo/dividend`,
             {
                 headers: {
-                    "content-type": "application/json; charset=utf-8",
                     authorization: `Bearer ${token}`,
                     appkey: APP_KEY,
                     appsecret: APP_SECRET,
                     tr_id: "HHKDB669102C0",
-                    custtype: "P"
+                    custtype: "P",
+                    "content-type": "application/json; charset=utf-8"
                 },
                 params: {
 
@@ -141,7 +126,7 @@ app.get("/api/kis-dividend/:ticker", async (req, res) => {
 
                     GB1: "0",
 
-                    F_DT: format(oneYearAgo),
+                    F_DT: format(before),
 
                     T_DT: format(today),
 
@@ -153,23 +138,17 @@ app.get("/api/kis-dividend/:ticker", async (req, res) => {
             }
         );
 
-        console.log("========== 배당 응답 ==========");
-        console.log(JSON.stringify(response.data, null, 2));
+        let result = null;
 
-        let latest = null;
+        if (Array.isArray(response.data.output1)) {
 
-        if (
-            response.data.output1 &&
-            Array.isArray(response.data.output1)
-        ) {
-
-            latest = response.data.output1.find(
-                item => item.sht_cd === ticker
+            result = response.data.output1.find(
+                x => x.sht_cd.trim() === ticker
             );
 
-            if (!latest) {
+            if (!result) {
 
-                latest = response.data.output1[0];
+                result = response.data.output1[0] || null;
 
             }
 
@@ -177,31 +156,27 @@ app.get("/api/kis-dividend/:ticker", async (req, res) => {
 
         res.json({
             success: true,
-            data: latest
+            data: result,
+            total: response.data.output1?.length || 0
         });
 
-    } catch (err) {
+    } catch (e) {
 
-        console.error("배당 API 오류");
-
-        console.error(err.response?.data || err.message);
+        console.log(e.response?.data || e.message);
 
         res.status(500).json({
-
             success: false,
-
-            error: err.response?.data || err.message
-
+            error: e.response?.data || e.message
         });
 
     }
 
 });
 
-const PORT = process.env.PORT || 5000;
+//=====================================================
 
-app.listen(PORT, () => {
+app.listen(process.env.PORT || 5000, () => {
 
-    console.log(`한국투자증권 통합 프록시 서버 포트 ${PORT} 실행 완료`);
+    console.log("KIS Proxy Server Start");
 
 });
