@@ -221,8 +221,7 @@ async function buildKisHeaders() {
     };
 }
 
-// 해외지수/환율/금 공용 조회 (inquire-time-indexchartprice, tr_id FHKST03030200)
-// mrktDivCode: N(해외지수) / X(환율) / S(금선물,상품) 등 - frgn_code.mst의 코드 앞글자에 대응
+// 해외지수/환율 공용 조회 (inquire-time-indexchartprice, tr_id FHKST03030200) - N/X/KX만 지원
 async function fetchOverseasIndexLike(headers, mrktDivCode, iscd, name, currency) {
     const res = await axios.get(
         `${BASE_URL}/uapi/overseas-price/v1/quotations/inquire-time-indexchartprice`,
@@ -230,6 +229,30 @@ async function fetchOverseasIndexLike(headers, mrktDivCode, iscd, name, currency
           params: { FID_COND_MRKT_DIV_CODE: mrktDivCode, FID_INPUT_ISCD: iscd, FID_HOUR_CLS_CODE: "0", FID_PW_DATA_INCU_YN: "N" } }
     );
     console.log(`[${name} 응답 원본 / market=${mrktDivCode} code=${iscd}]`, JSON.stringify(res.data));
+    const o = res.data.output1;
+    if (!o || o.ovrs_nmix_prpr === undefined) throw new Error(`${name} 데이터 없음`);
+    return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
+}
+
+// 금선물(S) 전용 조회 (inquire-daily-chartprice, tr_id FHKST03030100) - N/X/I/S 지원
+async function fetchGoldFromDailyChart(headers, iscd, name, currency) {
+    const today = new Date();
+    const weekAgo = new Date();
+    weekAgo.setDate(today.getDate() - 7);
+    const fmt = (d) => d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
+
+    const res = await axios.get(
+        `${BASE_URL}/uapi/overseas-price/v1/quotations/inquire-daily-chartprice`,
+        { headers: { ...headers, tr_id: "FHKST03030100" },
+          params: {
+              FID_COND_MRKT_DIV_CODE: "S",
+              FID_INPUT_ISCD: iscd,
+              FID_INPUT_DATE_1: fmt(weekAgo),
+              FID_INPUT_DATE_2: fmt(today),
+              FID_PERIOD_DIV_CODE: "D"
+          } }
+    );
+    console.log(`[${name} 응답 원본 / market=S code=${iscd}]`, JSON.stringify(res.data));
     const o = res.data.output1;
     if (!o || o.ovrs_nmix_prpr === undefined) throw new Error(`${name} 데이터 없음`);
     return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
