@@ -235,30 +235,6 @@ async function fetchOverseasIndexLike(headers, mrktDivCode, iscd, name, currency
     return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
 }
 
-// 해외 상품(금 등) 조회 시도 (inquire-daily-chartprice, tr_id FHKST03030100) - 더 이상 사용 안 함, 참고용 보류
-async function fetchOverseasCommodity(headers, mrktDivCode, iscd, name, currency) {
-    const today = new Date();
-    const weekAgo = new Date();
-    weekAgo.setDate(today.getDate() - 7);
-    const format = (d) => d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
-
-    const res = await axios.get(
-        `${BASE_URL}/uapi/overseas-price/v1/quotations/inquire-daily-chartprice`,
-        { headers: { ...headers, tr_id: "FHKST03030100" },
-          params: {
-              FID_COND_MRKT_DIV_CODE: mrktDivCode,
-              FID_INPUT_ISCD: iscd,
-              FID_INPUT_DATE_1: format(weekAgo),
-              FID_INPUT_DATE_2: format(today),
-              FID_PERIOD_DIV_CODE: "D"
-          } }
-    );
-    console.log(`[${name} 응답 원본(일별) / market=${mrktDivCode} code=${iscd}]`, JSON.stringify(res.data));
-    const o = res.data.output1;
-    if (!o || !parseFloat(o.ovrs_nmix_prpr)) throw new Error(`${name} 데이터 없음(0)`);
-    return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
-}
-
 // 국제 금(COMEX 선물) 조회 - 해외선물옵션 API (ffcode.mst로 확인된 정식 방식)
 // ffcode.mst 상 GC 품목의 계산소수점(sCalcDesz) = -1 -> 원시값에 10^-1(÷10)을 곱해야 실제 가격
 const GOLD_FUTURES_CALC_DESZ = -1;
@@ -307,24 +283,6 @@ async function fetchGoldFutures(headers) {
     throw new Error("유효한 금선물 근월물을 찾지 못했습니다.");
 }
 
-// 국제 금 전용 - KIS 상품성 지수코드가 계속 0으로 응답하면 야후 파이낸스로 자동 대체
-async function fetchGoldFromYahoo() {
-    const response = await axios.get(
-        "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
-        { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-          params: { interval: "1d", range: "5d" } }
-    );
-    const result = response.data?.chart?.result?.[0];
-    if (!result || !result.meta) throw new Error("야후 파이낸스 응답에 데이터가 없습니다.");
-    const meta = result.meta;
-    return {
-        name: "국제 금(온스당 달러)",
-        price: meta.regularMarketPrice,
-        previousClose: meta.chartPreviousClose ?? meta.previousClose,
-        currency: meta.currency
-    };
-}
-
 // 금선물(S) 전용 조회 (inquire-daily-chartprice, tr_id FHKST03030100) - N/X/I/S 지원
 async function fetchKisGlobal(key) {
     const headers = await buildKisHeaders();
@@ -354,12 +312,7 @@ async function fetchKisGlobal(key) {
     }
 
     if (key === "gold") {
-        try {
-            return await fetchGoldFutures(headers);
-        } catch (e) {
-            console.warn("KIS 금선물 조회 실패, 야후 파이낸스로 대체:", e.message);
-            return fetchGoldFromYahoo();
-        }
+        return fetchGoldFutures(headers);
     }
 
     if (key === "us30y") {
