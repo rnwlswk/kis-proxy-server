@@ -311,9 +311,9 @@ async function fetchKisGlobal(key) {
     }
 
     if (key === "gold") {
-        // frgn_code.mst 상 "CXAUUSDCOMP"(국제금가격) -> 접두사 C 제거 -> XAUUSDCOMP
-        // 이 항목은 일별시세 조회(FHKST03030100)에서만 market div "S"(금선물)가 통함
-        return fetchOverseasCommodity(headers, "S", "XAUUSDCOMP", "국제 금(온스당 달러)", "USD");
+        // frgn_code.mst 상 "CNYGOLD"(Gold, COMEX) -> 접두사 C 제거 -> NYGOLD
+        // XAUUSDCOMP는 데이터가 비어있어(0.00) NYGOLD로 교체
+        return fetchOverseasCommodity(headers, "S", "NYGOLD", "국제 금(온스당 달러)", "USD");
     }
 
     if (key === "us30y") {
