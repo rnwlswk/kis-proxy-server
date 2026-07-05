@@ -229,6 +229,7 @@ async function fetchOverseasIndexLike(headers, mrktDivCode, iscd, name, currency
         { headers: { ...headers, tr_id: "FHKST03030200" },
           params: { FID_COND_MRKT_DIV_CODE: mrktDivCode, FID_INPUT_ISCD: iscd, FID_HOUR_CLS_CODE: "0", FID_PW_DATA_INCU_YN: "N" } }
     );
+    console.log(`[${name} 응답 원본 / market=${mrktDivCode} code=${iscd}]`, JSON.stringify(res.data));
     const o = res.data.output1;
     if (!o || o.ovrs_nmix_prpr === undefined) throw new Error(`${name} 데이터 없음`);
     return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
