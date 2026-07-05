@@ -17,7 +17,6 @@ let tokenExpiry = null;
 // =========================
 async function getAccessToken() {
     const now = Date.now();
-
     if (cachedToken && tokenExpiry && now < tokenExpiry) {
         return cachedToken;
     }
@@ -30,25 +29,17 @@ async function getAccessToken() {
                 appkey: APP_KEY,
                 appsecret: APP_SECRET
             },
-            {
-                headers: {
-                    "content-type": "application/json"
-                }
-            }
+            { headers: { "content-type": "application/json" } }
         );
 
         cachedToken = response.data.access_token;
         tokenExpiry = now + (11 * 60 * 60 * 1000);
-
         console.log("새로운 KIS API 토큰 발급 완료.");
-
         return cachedToken;
 
     } catch (err) {
-
         console.error(err.response?.data || err.message);
         throw err;
-
     }
 }
 
@@ -56,18 +47,12 @@ async function getAccessToken() {
 // 현재가 API
 // =========================
 app.get("/api/kis-data/:ticker", async (req, res) => {
-
     try {
-
         const ticker = req.params.ticker;
         const token = await getAccessToken();
-
         const isGold = ticker === "M04020000";
 
-        const tr_id = isGold
-            ? "FHKST01010100"
-            : "FHPST02400000";
-
+        const tr_id = isGold ? "FHKST01010100" : "FHPST02400000";
         const endpoint = isGold
             ? "/uapi/domestic-stock/v1/quotations/inquire-price"
             : "/uapi/etfetn/v1/quotations/inquire-price";
@@ -92,30 +77,20 @@ app.get("/api/kis-data/:ticker", async (req, res) => {
         res.json(response.data);
 
     } catch (err) {
-
         console.error(err.response?.data || err.message);
-
-        res.status(500).json({
-            error: "현재가 조회 실패"
-        });
-
+        res.status(500).json({ error: "현재가 조회 실패" });
     }
-
 });
 
 // =========================
 // 배당 API
 // =========================
 app.get("/api/kis-dividend/:ticker", async (req, res) => {
-
     try {
-
         const ticker = req.params.ticker;
-
         const token = await getAccessToken();
 
         const today = new Date();
-
         const oneYearAgo = new Date();
         oneYearAgo.setFullYear(today.getFullYear() - 1);
 
@@ -136,66 +111,27 @@ app.get("/api/kis-dividend/:ticker", async (req, res) => {
                     custtype: "P"
                 },
                 params: {
-
                     CTS: "",
-
                     GB1: "0",
-
                     F_DT: format(oneYearAgo),
-
                     T_DT: format(today),
-
                     SHT_CD: ticker,
-
                     HIGH_GB: "0"
-
                 }
             }
         );
 
-        console.log("========== 배당 응답 ==========");
-        console.log(JSON.stringify(response.data, null, 2));
-
         let latest = null;
-
-        if (
-            response.data.output1 &&
-            Array.isArray(response.data.output1)
-        ) {
-
-            latest = response.data.output1.find(
-                item => item.sht_cd === ticker
-            );
-
-            if (!latest) {
-
-                latest = response.data.output1[0];
-
-            }
-
+        if (response.data.output1 && Array.isArray(response.data.output1)) {
+            latest = response.data.output1.find(item => item.sht_cd === ticker) || response.data.output1[0];
         }
 
-        res.json({
-            success: true,
-            data: latest
-        });
+        res.json({ success: true, data: latest });
 
     } catch (err) {
-
-        console.error("배당 API 오류");
-
-        console.error(err.response?.data || err.message);
-
-        res.status(500).json({
-
-            success: false,
-
-            error: err.response?.data || err.message
-
-        });
-
+        console.error("배당 API 오류", err.response?.data || err.message);
+        res.status(500).json({ success: false, error: err.response?.data || err.message });
     }
-
 });
 
 // =========================
@@ -221,7 +157,6 @@ async function buildKisHeaders() {
     };
 }
 
-// 해외지수/환율 공용 조회 (inquire-time-indexchartprice, tr_id FHKST03030200) - N/X/KX만 지원
 // 해외지수/환율 공용 조회 (inquire-time-indexchartprice, tr_id FHKST03030200) - N(지수)/X(환율) 전용
 async function fetchOverseasIndexLike(headers, mrktDivCode, iscd, name, currency) {
     const res = await axios.get(
@@ -229,62 +164,34 @@ async function fetchOverseasIndexLike(headers, mrktDivCode, iscd, name, currency
         { headers: { ...headers, tr_id: "FHKST03030200" },
           params: { FID_COND_MRKT_DIV_CODE: mrktDivCode, FID_INPUT_ISCD: iscd, FID_HOUR_CLS_CODE: "0", FID_PW_DATA_INCU_YN: "N" } }
     );
-    console.log(`[${name} 응답 원본 / market=${mrktDivCode} code=${iscd}]`, JSON.stringify(res.data));
     const o = res.data.output1;
     if (!o || o.ovrs_nmix_prpr === undefined) throw new Error(`${name} 데이터 없음`);
     return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
 }
 
-// 국제 금(COMEX 선물) 조회 - 해외선물옵션 API (ffcode.mst로 확인된 정식 방식)
-// ffcode.mst 상 GC 품목의 계산소수점(sCalcDesz) = -1 -> 원시값에 10^-1(÷10)을 곱해야 실제 가격
-const GOLD_FUTURES_CALC_DESZ = -1;
-const FUTURES_MONTH_CODE = { 1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M", 7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z" };
-
-// monthsAhead=0이면 이번 달 계약, 1이면 다음 달 계약 코드를 만듦 (예: GCQ26)
-function getGoldContractCode(monthsAhead) {
-    const now = new Date();
-    const target = new Date(now.getFullYear(), now.getMonth() + monthsAhead, 1);
-    const monthCode = FUTURES_MONTH_CODE[target.getMonth() + 1];
-    const yearCode = String(target.getFullYear()).slice(-2);
-    return `GC${monthCode}${yearCode}`;
-}
-
-async function fetchGoldFuturesBySrsCd(headers, srsCd) {
-    const res = await axios.get(
-        `${BASE_URL}/uapi/overseas-futureoption/v1/quotations/inquire-price`,
-        { headers: { ...headers, tr_id: "HHDFC55010000", custtype: "P" },
-          params: { SRS_CD: srsCd } }
+// 국제 금 - 야후 파이낸스 (COMEX 금선물 GC=F, KIS와 무관한 별도 무료 공개 API)
+async function fetchGoldFromYahoo() {
+    const response = await axios.get(
+        "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
+        { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+          params: { interval: "1d", range: "5d" } }
     );
-    console.log(`[국제 금(선물) 응답 원본 / SRS_CD=${srsCd}]`, JSON.stringify(res.data));
-    const o = res.data.output1;
-    if (!o || !parseFloat(o.last_price)) return null; // 만기/미상장 등으로 데이터 없음 -> 다음 후보로
-
-    const scale = Math.pow(10, GOLD_FUTURES_CALC_DESZ);
+    const result = response.data?.chart?.result?.[0];
+    if (!result || !result.meta) throw new Error("야후 파이낸스 응답에 데이터가 없습니다.");
+    const meta = result.meta;
     return {
-        name: "국제 금(COMEX 선물, 온스당 달러)",
-        price: parseFloat(o.last_price) * scale,
-        previousClose: parseFloat(o.prev_price) * scale,
-        currency: o.crc_cd || "USD"
+        name: "국제 금(온스당 달러)",
+        price: meta.regularMarketPrice,
+        previousClose: meta.chartPreviousClose ?? meta.previousClose,
+        currency: meta.currency
     };
 }
 
-// 이번 달 -> 다음 달 -> 다다음 달 순서로 시도해서, 만기 지난 계약은 자동으로 건너뛰고
-// 실제 데이터가 있는 근월물을 찾음 (매달 코드를 수동으로 바꿀 필요 없음)
-async function fetchGoldFutures(headers) {
-    for (const monthsAhead of [0, 1, 2, 3]) {
-        const srsCd = getGoldContractCode(monthsAhead);
-        try {
-            const result = await fetchGoldFuturesBySrsCd(headers, srsCd);
-            if (result) return result;
-        } catch (e) {
-            console.warn(`[국제 금(선물)] ${srsCd} 조회 실패, 다음 근월물 시도:`, e.response?.data || e.message);
-        }
-    }
-    throw new Error("유효한 금선물 근월물을 찾지 못했습니다.");
-}
-
-// 금선물(S) 전용 조회 (inquire-daily-chartprice, tr_id FHKST03030100) - N/X/I/S 지원
 async function fetchKisGlobal(key) {
+    if (key === "gold") {
+        return fetchGoldFromYahoo();
+    }
+
     const headers = await buildKisHeaders();
 
     if (key === "kospi") {
@@ -311,10 +218,6 @@ async function fetchKisGlobal(key) {
         return fetchOverseasIndexLike(headers, "X", "FX@KRW", "원/달러 환율", "KRW");
     }
 
-    if (key === "gold") {
-        return fetchGoldFutures(headers);
-    }
-
     if (key === "us30y") {
         const res = await axios.get(
             `${BASE_URL}/uapi/domestic-stock/v1/quotations/comp-interest`,
@@ -339,7 +242,7 @@ app.get("/api/global/:key", async (req, res) => {
             return res.status(404).json({ success: false, error: "지원하지 않는 지수 키입니다." });
         }
 
-        res.json({ success: true, key, source: "kis", ...data });
+        res.json({ success: true, key, source: key === "gold" ? "yahoo" : "kis", ...data });
 
     } catch (err) {
         console.error(`[글로벌지수 오류] ${req.params.key}:`, err.response?.data || err.message);
@@ -350,7 +253,5 @@ app.get("/api/global/:key", async (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-
     console.log(`한국투자증권 통합 프록시 서버 포트 ${PORT} 실행 완료`);
-
 });
