@@ -235,7 +235,7 @@ async function fetchOverseasIndexLike(headers, mrktDivCode, iscd, name, currency
     return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
 }
 
-// 국제 금(금선물) 전용 조회 (inquire-daily-chartprice, tr_id FHKST03030100) - N/X/I/S 중 S(금선물) 지원
+// 해외 상품(금 등) 조회 시도 (inquire-daily-chartprice, tr_id FHKST03030100) - 더 이상 사용 안 함, 참고용 보류
 async function fetchOverseasCommodity(headers, mrktDivCode, iscd, name, currency) {
     const today = new Date();
     const weekAgo = new Date();
@@ -255,34 +255,77 @@ async function fetchOverseasCommodity(headers, mrktDivCode, iscd, name, currency
     );
     console.log(`[${name} 응답 원본(일별) / market=${mrktDivCode} code=${iscd}]`, JSON.stringify(res.data));
     const o = res.data.output1;
-    if (!o || o.ovrs_nmix_prpr === undefined) throw new Error(`${name} 데이터 없음`);
+    if (!o || !parseFloat(o.ovrs_nmix_prpr)) throw new Error(`${name} 데이터 없음(0)`);
     return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
+}
+
+// 국제 금(COMEX 선물) 조회 - 해외선물옵션 API (ffcode.mst로 확인된 정식 방식)
+// ffcode.mst 상 GC 품목의 계산소수점(sCalcDesz) = -1 -> 원시값에 10^-1(÷10)을 곱해야 실제 가격
+const GOLD_FUTURES_CALC_DESZ = -1;
+const FUTURES_MONTH_CODE = { 1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M", 7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z" };
+
+// monthsAhead=0이면 이번 달 계약, 1이면 다음 달 계약 코드를 만듦 (예: GCQ26)
+function getGoldContractCode(monthsAhead) {
+    const now = new Date();
+    const target = new Date(now.getFullYear(), now.getMonth() + monthsAhead, 1);
+    const monthCode = FUTURES_MONTH_CODE[target.getMonth() + 1];
+    const yearCode = String(target.getFullYear()).slice(-2);
+    return `GC${monthCode}${yearCode}`;
+}
+
+async function fetchGoldFuturesBySrsCd(headers, srsCd) {
+    const res = await axios.get(
+        `${BASE_URL}/uapi/overseas-futureoption/v1/quotations/inquire-price`,
+        { headers: { ...headers, tr_id: "HHDFC55010000", custtype: "P" },
+          params: { SRS_CD: srsCd } }
+    );
+    console.log(`[국제 금(선물) 응답 원본 / SRS_CD=${srsCd}]`, JSON.stringify(res.data));
+    const o = res.data.output1;
+    if (!o || !parseFloat(o.last_price)) return null; // 만기/미상장 등으로 데이터 없음 -> 다음 후보로
+
+    const scale = Math.pow(10, GOLD_FUTURES_CALC_DESZ);
+    return {
+        name: "국제 금(COMEX 선물, 온스당 달러)",
+        price: parseFloat(o.last_price) * scale,
+        previousClose: parseFloat(o.prev_price) * scale,
+        currency: o.crc_cd || "USD"
+    };
+}
+
+// 이번 달 -> 다음 달 -> 다다음 달 순서로 시도해서, 만기 지난 계약은 자동으로 건너뛰고
+// 실제 데이터가 있는 근월물을 찾음 (매달 코드를 수동으로 바꿀 필요 없음)
+async function fetchGoldFutures(headers) {
+    for (const monthsAhead of [0, 1, 2, 3]) {
+        const srsCd = getGoldContractCode(monthsAhead);
+        try {
+            const result = await fetchGoldFuturesBySrsCd(headers, srsCd);
+            if (result) return result;
+        } catch (e) {
+            console.warn(`[국제 금(선물)] ${srsCd} 조회 실패, 다음 근월물 시도:`, e.response?.data || e.message);
+        }
+    }
+    throw new Error("유효한 금선물 근월물을 찾지 못했습니다.");
+}
+
+// 국제 금 전용 - KIS 상품성 지수코드가 계속 0으로 응답하면 야후 파이낸스로 자동 대체
+async function fetchGoldFromYahoo() {
+    const response = await axios.get(
+        "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
+        { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+          params: { interval: "1d", range: "5d" } }
+    );
+    const result = response.data?.chart?.result?.[0];
+    if (!result || !result.meta) throw new Error("야후 파이낸스 응답에 데이터가 없습니다.");
+    const meta = result.meta;
+    return {
+        name: "국제 금(온스당 달러)",
+        price: meta.regularMarketPrice,
+        previousClose: meta.chartPreviousClose ?? meta.previousClose,
+        currency: meta.currency
+    };
 }
 
 // 금선물(S) 전용 조회 (inquire-daily-chartprice, tr_id FHKST03030100) - N/X/I/S 지원
-async function fetchGoldFromDailyChart(headers, iscd, name, currency) {
-    const today = new Date();
-    const weekAgo = new Date();
-    weekAgo.setDate(today.getDate() - 7);
-    const fmt = (d) => d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
-
-    const res = await axios.get(
-        `${BASE_URL}/uapi/overseas-price/v1/quotations/inquire-daily-chartprice`,
-        { headers: { ...headers, tr_id: "FHKST03030100" },
-          params: {
-              FID_COND_MRKT_DIV_CODE: "S",
-              FID_INPUT_ISCD: iscd,
-              FID_INPUT_DATE_1: fmt(weekAgo),
-              FID_INPUT_DATE_2: fmt(today),
-              FID_PERIOD_DIV_CODE: "D"
-          } }
-    );
-    console.log(`[${name} 응답 원본 / market=S code=${iscd}]`, JSON.stringify(res.data));
-    const o = res.data.output1;
-    if (!o || o.ovrs_nmix_prpr === undefined) throw new Error(`${name} 데이터 없음`);
-    return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
-}
-
 async function fetchKisGlobal(key) {
     const headers = await buildKisHeaders();
 
@@ -311,9 +354,12 @@ async function fetchKisGlobal(key) {
     }
 
     if (key === "gold") {
-        // frgn_code.mst 상 "CNYGOLD"(Gold, COMEX) -> 접두사 C 제거 -> NYGOLD
-        // XAUUSDCOMP는 데이터가 비어있어(0.00) NYGOLD로 교체
-        return fetchOverseasCommodity(headers, "S", "NYGOLD", "국제 금(온스당 달러)", "USD");
+        try {
+            return await fetchGoldFutures(headers);
+        } catch (e) {
+            console.warn("KIS 금선물 조회 실패, 야후 파이낸스로 대체:", e.message);
+            return fetchGoldFromYahoo();
+        }
     }
 
     if (key === "us30y") {
