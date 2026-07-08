@@ -11,6 +11,22 @@ const BASE_URL = "https://openapi.koreainvestment.com:9443";
 
 let cachedToken = null;
 let tokenExpiry = null;
+let tokenRequestPromise = null; // 동시에 여러 요청이 토큰이 없다고 판단해 중복 발급하는 것을 방지
+
+// KIS는 초당 호출 횟수 제한이 있어서, 실제 KIS로 나가는 모든 요청을 한 줄로 세워
+// 최소 간격(KIS_CALL_INTERVAL_MS)을 두고 순차적으로만 내보낸다.
+const KIS_CALL_INTERVAL_MS = 250;
+let kisQueue = Promise.resolve();
+
+function callKisThrottled(fn) {
+    const run = kisQueue.then(async () => {
+        await new Promise(resolve => setTimeout(resolve, KIS_CALL_INTERVAL_MS));
+        return fn();
+    });
+    // 실패해도 큐 자체는 계속 이어지도록 별도 체인으로 분리
+    kisQueue = run.then(() => {}, () => {});
+    return run;
+}
 
 // =========================
 // Access Token
@@ -21,26 +37,37 @@ async function getAccessToken() {
         return cachedToken;
     }
 
-    try {
-        const response = await axios.post(
-            `${BASE_URL}/oauth2/tokenP`,
-            {
-                grant_type: "client_credentials",
-                appkey: APP_KEY,
-                appsecret: APP_SECRET
-            },
-            { headers: { "content-type": "application/json" } }
-        );
-
-        cachedToken = response.data.access_token;
-        tokenExpiry = now + (11 * 60 * 60 * 1000);
-        console.log("새로운 KIS API 토큰 발급 완료.");
-        return cachedToken;
-
-    } catch (err) {
-        console.error(err.response?.data || err.message);
-        throw err;
+    // 이미 다른 요청이 토큰 발급을 진행 중이면, 새로 요청하지 않고 그 결과를 같이 기다린다.
+    if (tokenRequestPromise) {
+        return tokenRequestPromise;
     }
+
+    tokenRequestPromise = (async () => {
+        try {
+            const response = await axios.post(
+                `${BASE_URL}/oauth2/tokenP`,
+                {
+                    grant_type: "client_credentials",
+                    appkey: APP_KEY,
+                    appsecret: APP_SECRET
+                },
+                { headers: { "content-type": "application/json" } }
+            );
+
+            cachedToken = response.data.access_token;
+            tokenExpiry = Date.now() + (11 * 60 * 60 * 1000);
+            console.log("새로운 KIS API 토큰 발급 완료.");
+            return cachedToken;
+
+        } catch (err) {
+            console.error(err.response?.data || err.message);
+            throw err;
+        } finally {
+            tokenRequestPromise = null;
+        }
+    })();
+
+    return tokenRequestPromise;
 }
 
 // =========================
@@ -57,7 +84,7 @@ app.get("/api/kis-data/:ticker", async (req, res) => {
             ? "/uapi/domestic-stock/v1/quotations/inquire-price"
             : "/uapi/etfetn/v1/quotations/inquire-price";
 
-        const response = await axios.get(
+        const response = await callKisThrottled(() => axios.get(
             `${BASE_URL}${endpoint}`,
             {
                 headers: {
@@ -72,7 +99,7 @@ app.get("/api/kis-data/:ticker", async (req, res) => {
                     FID_INPUT_ISCD: ticker
                 }
             }
-        );
+        ));
 
         res.json(response.data);
 
@@ -99,7 +126,7 @@ app.get("/api/kis-dividend/:ticker", async (req, res) => {
             String(d.getMonth() + 1).padStart(2, "0") +
             String(d.getDate()).padStart(2, "0");
 
-        const response = await axios.get(
+        const response = await callKisThrottled(() => axios.get(
             `${BASE_URL}/uapi/domestic-stock/v1/ksdinfo/dividend`,
             {
                 headers: {
@@ -119,7 +146,7 @@ app.get("/api/kis-dividend/:ticker", async (req, res) => {
                     HIGH_GB: "0"
                 }
             }
-        );
+        ));
 
         let latest = null;
         if (response.data.output1 && Array.isArray(response.data.output1)) {
@@ -159,11 +186,11 @@ async function buildKisHeaders() {
 
 // 해외지수/환율 공용 조회 (inquire-time-indexchartprice, tr_id FHKST03030200) - N(지수)/X(환율) 전용
 async function fetchOverseasIndexLike(headers, mrktDivCode, iscd, name, currency) {
-    const res = await axios.get(
+    const res = await callKisThrottled(() => axios.get(
         `${BASE_URL}/uapi/overseas-price/v1/quotations/inquire-time-indexchartprice`,
         { headers: { ...headers, tr_id: "FHKST03030200" },
           params: { FID_COND_MRKT_DIV_CODE: mrktDivCode, FID_INPUT_ISCD: iscd, FID_HOUR_CLS_CODE: "0", FID_PW_DATA_INCU_YN: "N" } }
-    );
+    ));
     const o = res.data.output1;
     if (!o || o.ovrs_nmix_prpr === undefined) throw new Error(`${name} 데이터 없음`);
     return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
@@ -195,11 +222,11 @@ async function fetchKisGlobal(key) {
     const headers = await buildKisHeaders();
 
     if (key === "kospi") {
-        const res = await axios.get(
+        const res = await callKisThrottled(() => axios.get(
             `${BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-index-price`,
             { headers: { ...headers, tr_id: "FHPUP02100000" },
               params: { FID_COND_MRKT_DIV_CODE: "U", FID_INPUT_ISCD: "0001" } }
-        );
+        ));
         const o = res.data.output;
         const price = parseFloat(o.bstp_nmix_prpr);
         const signedVrss = computeSignedVrss(o.bstp_nmix_prdy_vrss, o.prdy_vrss_sign);
@@ -219,11 +246,11 @@ async function fetchKisGlobal(key) {
     }
 
     if (key === "us30y") {
-        const res = await axios.get(
+        const res = await callKisThrottled(() => axios.get(
             `${BASE_URL}/uapi/domestic-stock/v1/quotations/comp-interest`,
             { headers: { ...headers, tr_id: "FHPST07020000" },
               params: { FID_COND_MRKT_DIV_CODE: "I", FID_COND_SCR_DIV_CODE: "20702", FID_DIV_CLS_CODE: "1", FID_DIV_CLS_CODE1: "" } }
-        );
+        ));
         const item = (res.data.output1 || []).find(x => x.bcdt_code === "Y0201");
         if (!item) throw new Error("미국 30년 국채 데이터를 찾을 수 없습니다.");
         const price = parseFloat(item.bond_mnrt_prpr);
