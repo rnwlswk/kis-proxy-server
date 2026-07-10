@@ -1,0 +1,17 @@
+name: Keep Render Server Awake
+
+on:
+  schedule:
+    # 코스피 정규장 시간대 (한국시간 09:00~16:00 ≈ UTC 00:00~07:00), 평일만
+    - cron: '*/10 0-6 * * 1-5'
+    # 미국 정규장 시간대 (한국시간 22:00~06:00 ≈ UTC 13:00~21:00, 서머타임 대비 여유있게), 평일만
+    - cron: '*/10 13-20 * * 1-5'
+  workflow_dispatch: {}   # Actions 탭에서 수동으로도 실행해볼 수 있게 함
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Render 서버에 핑 보내기
+        run: |
+          curl -s -o /dev/null -w "응답 코드: %{http_code}\n" https://kis-proxy-server-k0g3.onrender.com/
