@@ -73,6 +73,14 @@ async function getAccessToken() {
 // =========================
 // 현재가 API
 // =========================
+// =========================
+// 헬스체크(핑) API - 크론잡/모니터링 서비스가 서버를 깨우는 용도
+// KIS 호출 없이 즉시 200을 반환해서, 모니터링 툴이 "실패"로 오판하지 않도록 함
+// =========================
+app.get("/health", (req, res) => {
+    res.status(200).json({ status: "ok", time: new Date().toISOString() });
+});
+
 app.get("/api/kis-data/:ticker", async (req, res) => {
     try {
         const ticker = req.params.ticker;
