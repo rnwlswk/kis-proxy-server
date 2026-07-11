@@ -110,6 +110,44 @@ app.get("/api/kis-data/:ticker", async (req, res) => {
 });
 
 // =========================
+// 52주 최고/최저가 API (ETF도 KRX 상장종목이라 이 일반 주식현재가 API로 조회 가능)
+// =========================
+app.get("/api/kis-52week/:ticker", async (req, res) => {
+    try {
+        const ticker = req.params.ticker;
+        const token = await getAccessToken();
+
+        const response = await callKisThrottled(() => axios.get(
+            `${BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price`,
+            {
+                headers: {
+                    "content-type": "application/json; charset=utf-8",
+                    authorization: `Bearer ${token}`,
+                    appkey: APP_KEY,
+                    appsecret: APP_SECRET,
+                    tr_id: "FHKST01010100"
+                },
+                params: {
+                    FID_COND_MRKT_DIV_CODE: "J",
+                    FID_INPUT_ISCD: ticker
+                }
+            }
+        ));
+
+        const o = response.data.output || {};
+        res.json({
+            success: true,
+            w52_hgpr: o.w52_hgpr,
+            w52_lwpr: o.w52_lwpr
+        });
+
+    } catch (err) {
+        console.error(err.response?.data || err.message);
+        res.status(500).json({ success: false, error: "52주 최고/최저 조회 실패" });
+    }
+});
+
+// =========================
 // 배당 API
 // =========================
 app.get("/api/kis-dividend/:ticker", async (req, res) => {
