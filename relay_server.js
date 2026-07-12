@@ -15,7 +15,9 @@ let tokenRequestPromise = null; // 동시에 여러 요청이 토큰이 없다�
 
 // KIS는 초당 호출 횟수 제한이 있어서, 실제 KIS로 나가는 모든 요청을 한 줄로 세워
 // 최소 간격(KIS_CALL_INTERVAL_MS)을 두고 순차적으로만 내보낸다.
-const KIS_CALL_INTERVAL_MS = 250;
+// KIS 실전투자 계좌는 초당 20건까지 허용되므로, 75ms 간격(초당 약 13건)으로
+// 안전마진을 두면서도 이전(250ms)보다 3배 이상 빠르게 처리한다.
+const KIS_CALL_INTERVAL_MS = 75;
 let kisQueue = Promise.resolve();
 
 function callKisThrottled(fn) {
