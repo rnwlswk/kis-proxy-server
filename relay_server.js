@@ -13,21 +13,37 @@ let cachedToken = null;
 let tokenExpiry = null;
 let tokenRequestPromise = null; // 동시에 여러 요청이 토큰이 없다고 판단해 중복 발급하는 것을 방지
 
-// KIS는 초당 호출 횟수 제한이 있어서, 실제 KIS로 나가는 모든 요청을 한 줄로 세워
-// 최소 간격(KIS_CALL_INTERVAL_MS)을 두고 순차적으로만 내보낸다.
-// KIS 실전투자 계좌는 초당 20건까지 허용되므로, 75ms 간격(초당 약 13건)으로
-// 안전마진을 두면서도 이전(250ms)보다 3배 이상 빠르게 처리한다.
-const KIS_CALL_INTERVAL_MS = 75;
-let kisQueue = Promise.resolve();
+// KIS는 초당 호출 횟수 제한(실전투자 기준 초당 20건)이 있다.
+// 예전엔 요청을 1개씩 완전히 순서대로만 보내서, 매 요청마다 왕복시간(지연)이 그대로 다 더해져 느렸다.
+// 이제는 최대 KIS_MAX_CONCURRENT개까지 동시에 진행시켜 왕복시간이 겹치게 하면서,
+// 새 요청을 "시작"하는 속도 자체는 KIS_MIN_START_GAP_MS 간격으로 제한해 초당 건수 한도를 안전하게 지킨다.
+const KIS_MAX_CONCURRENT = 4;
+const KIS_MIN_START_GAP_MS = 60; // 최대 초당 약 16건 시작 (한도 20건보다 여유있게)
+let kisActiveCount = 0;
+const kisWaitQueue = [];
+let kisPumpRunning = false;
+
+async function kisPump() {
+    if (kisPumpRunning) return;
+    kisPumpRunning = true;
+    while (kisWaitQueue.length > 0) {
+        if (kisActiveCount >= KIS_MAX_CONCURRENT) {
+            await new Promise(resolve => setTimeout(resolve, 20));
+            continue;
+        }
+        const task = kisWaitQueue.shift();
+        kisActiveCount++;
+        task().finally(() => { kisActiveCount--; });
+        await new Promise(resolve => setTimeout(resolve, KIS_MIN_START_GAP_MS));
+    }
+    kisPumpRunning = false;
+}
 
 function callKisThrottled(fn) {
-    const run = kisQueue.then(async () => {
-        await new Promise(resolve => setTimeout(resolve, KIS_CALL_INTERVAL_MS));
-        return fn();
+    return new Promise((resolve, reject) => {
+        kisWaitQueue.push(() => Promise.resolve().then(fn).then(resolve, reject));
+        kisPump();
     });
-    // 실패해도 큐 자체는 계속 이어지도록 별도 체인으로 분리
-    kisQueue = run.then(() => {}, () => {});
-    return run;
 }
 
 // =========================
@@ -57,8 +73,13 @@ async function getAccessToken() {
             );
 
             cachedToken = response.data.access_token;
-            tokenExpiry = Date.now() + (11 * 60 * 60 * 1000);
-            console.log("새로운 KIS API 토큰 발급 완료.");
+            // KIS가 응답으로 알려주는 실제 유효시간(expires_in, 보통 86400초=24시간)을 그대로 사용.
+            // 혹시 응답에 없으면 23시간으로 안전하게 폴백. 만료 10분 전에 미리 갱신해서
+            // "딱 그 순간 만료된 토큰을 쓰는" 상황을 피한다.
+            const expiresInSec = response.data.expires_in || (23 * 60 * 60);
+            const SAFETY_MARGIN_MS = 10 * 60 * 1000;
+            tokenExpiry = Date.now() + (expiresInSec * 1000) - SAFETY_MARGIN_MS;
+            console.log(`새로운 KIS API 토큰 발급 완료. (${Math.round(expiresInSec / 3600)}시간 캐시)`);
             return cachedToken;
 
         } catch (err) {
