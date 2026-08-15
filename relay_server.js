@@ -94,9 +94,6 @@ async function getAccessToken() {
 }
 
 // =========================
-// 현재가 API
-// =========================
-// =========================
 // 헬스체크(핑) API - 크론잡/모니터링 서비스가 서버를 깨우는 용도
 // KIS 호출 없이 즉시 200을 반환해서, 모니터링 툴이 "실패"로 오판하지 않도록 함
 // =========================
@@ -104,6 +101,9 @@ app.get("/health", (req, res) => {
     res.status(200).json({ status: "ok", time: new Date().toISOString() });
 });
 
+// =========================
+// 현재가 API
+// =========================
 app.get("/api/kis-data/:ticker", async (req, res) => {
     try {
         const ticker = req.params.ticker;
@@ -179,7 +179,7 @@ app.get("/api/kis-52week/:ticker", async (req, res) => {
 });
 
 // =========================
-// 배당 API
+// 배당 API - 최신 회차와 그 직전 회차를 같이 내려줘서, 프론트에서 증감(상승/하락)을 비교할 수 있게 함
 // =========================
 app.get("/api/kis-dividend/:ticker", async (req, res) => {
     try {
@@ -217,12 +217,18 @@ app.get("/api/kis-dividend/:ticker", async (req, res) => {
             }
         ));
 
-        let latest = null;
+        let sorted = [];
         if (response.data.output1 && Array.isArray(response.data.output1)) {
-            latest = response.data.output1.find(item => item.sht_cd === ticker) || response.data.output1[0];
+            const filtered = response.data.output1.filter(item => item.sht_cd === ticker);
+            const list = filtered.length > 0 ? filtered : response.data.output1;
+            // record_date(YYYYMMDD) 기준 최신순 정렬
+            sorted = [...list].sort((a, b) => (b.record_date || "").localeCompare(a.record_date || ""));
         }
 
-        res.json({ success: true, data: latest });
+        const latest = sorted[0] || null;
+        const previous = sorted[1] || null;
+
+        res.json({ success: true, data: latest, previousData: previous });
 
     } catch (err) {
         console.error("배당 API 오류", err.response?.data || err.message);
