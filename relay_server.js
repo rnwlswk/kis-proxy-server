@@ -17,8 +17,9 @@ let tokenRequestPromise = null; // 동시에 여러 요청이 토큰이 없다�
 // 예전엔 요청을 1개씩 완전히 순서대로만 보내서, 매 요청마다 왕복시간(지연)이 그대로 다 더해져 느렸다.
 // 이제는 최대 KIS_MAX_CONCURRENT개까지 동시에 진행시켜 왕복시간이 겹치게 하면서,
 // 새 요청을 "시작"하는 속도 자체는 KIS_MIN_START_GAP_MS 간격으로 제한해 초당 건수 한도를 안전하게 지킨다.
-const KIS_MAX_CONCURRENT = 4;
-const KIS_MIN_START_GAP_MS = 60; // 최대 초당 약 16건 시작 (한도 20건보다 여유있게)
+// (75ms/4개 조합에서도 EGW00201이 재발해서, 동시성을 낮추고 간격을 더 늘려 여유를 키움)
+const KIS_MAX_CONCURRENT = 2;
+const KIS_MIN_START_GAP_MS = 100; // 최대 초당 약 10건 시작 (한도 20건 대비 절반 수준으로 여유있게)
 let kisActiveCount = 0;
 const kisWaitQueue = [];
 let kisPumpRunning = false;
@@ -274,30 +275,26 @@ async function fetchOverseasIndexLike(headers, mrktDivCode, iscd, name, currency
 // 국제 금 - 야후 파이낸스. 런던 금 현물(XAU=X)을 우선 사용 (국내 증권사들이 보통 이 기준을 씀).
 // 선물(GC=F)은 만기까지 남은 기간 때문에 현물보다 보통 1~3% 비싸게 나와서(콘탱고),
 // 국내 증권사 "국제금가격" 표시와 비교하면 현물 쪽이 더 가깝다. 혹시 실패하면 선물로 폴백.
+// 국제 금 - 야후 파이낸스 COMEX 금선물(GC=F).
+// 현물(spot) 티커를 여러 개 시도해봤으나(XAUUSD=X, XAU=X) 이 야후 비공식 API에서는 둘 다
+// 404로 응답해서 사용이 불가능했음 (2026-08 기준). 그래서 확실히 동작하는 선물 가격을 사용한다.
+// 참고: 선물은 만기까지 남은 기간 때문에 현물보다 보통 1~3% 비싸게 나오는 경향(콘탱고)이 있어서,
+// 국내 증권사가 보여주는 "국제금가격"(대개 현물 기준)과는 이 정도 차이가 날 수 있다.
 async function fetchGoldFromYahoo() {
-    const fetchByTicker = async (ticker) => {
-        const response = await axios.get(
-            `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}`,
-            { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-              params: { interval: "1d", range: "5d" } }
-        );
-        const result = response.data?.chart?.result?.[0];
-        if (!result || !result.meta) throw new Error("야후 파이낸스 응답에 데이터가 없습니다.");
-        const meta = result.meta;
-        return {
-            name: "국제 금(온스당 달러)",
-            price: meta.regularMarketPrice,
-            previousClose: meta.chartPreviousClose ?? meta.previousClose,
-            currency: meta.currency
-        };
+    const response = await axios.get(
+        "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
+        { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+          params: { interval: "1d", range: "5d" } }
+    );
+    const result = response.data?.chart?.result?.[0];
+    if (!result || !result.meta) throw new Error("야후 파이낸스 응답에 데이터가 없습니다.");
+    const meta = result.meta;
+    return {
+        name: "국제 금(온스당 달러, 선물 기준)",
+        price: meta.regularMarketPrice,
+        previousClose: meta.chartPreviousClose ?? meta.previousClose,
+        currency: meta.currency
     };
-
-    try {
-        return await fetchByTicker("XAU=X");
-    } catch (e) {
-        console.warn("XAU=X 조회 실패, GC=F(선물)로 대체:", e.message);
-        return fetchByTicker("GC=F");
-    }
 }
 
 async function fetchKisGlobal(key) {
