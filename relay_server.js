@@ -271,22 +271,33 @@ async function fetchOverseasIndexLike(headers, mrktDivCode, iscd, name, currency
     return { name, price: parseFloat(o.ovrs_nmix_prpr), previousClose: parseFloat(o.ovrs_nmix_prdy_clpr), currency };
 }
 
-// 국제 금 - 야후 파이낸스 (COMEX 금선물 GC=F, KIS와 무관한 별도 무료 공개 API)
+// 국제 금 - 야후 파이낸스. 런던 금 현물(XAUUSD=X)을 우선 사용 (국내 증권사들이 보통 이 기준을 씀).
+// 선물(GC=F)은 만기까지 남은 기간 때문에 현물보다 보통 1~3% 비싸게 나와서(콘탱고),
+// 국내 증권사 "국제금가격" 표시와 비교하면 현물 쪽이 더 가깝다. 혹시 실패하면 선물로 폴백.
 async function fetchGoldFromYahoo() {
-    const response = await axios.get(
-        "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
-        { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-          params: { interval: "1d", range: "5d" } }
-    );
-    const result = response.data?.chart?.result?.[0];
-    if (!result || !result.meta) throw new Error("야후 파이낸스 응답에 데이터가 없습니다.");
-    const meta = result.meta;
-    return {
-        name: "국제 금(온스당 달러)",
-        price: meta.regularMarketPrice,
-        previousClose: meta.chartPreviousClose ?? meta.previousClose,
-        currency: meta.currency
+    const fetchByTicker = async (ticker) => {
+        const response = await axios.get(
+            `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}`,
+            { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+              params: { interval: "1d", range: "5d" } }
+        );
+        const result = response.data?.chart?.result?.[0];
+        if (!result || !result.meta) throw new Error("야후 파이낸스 응답에 데이터가 없습니다.");
+        const meta = result.meta;
+        return {
+            name: "국제 금(온스당 달러)",
+            price: meta.regularMarketPrice,
+            previousClose: meta.chartPreviousClose ?? meta.previousClose,
+            currency: meta.currency
+        };
     };
+
+    try {
+        return await fetchByTicker("XAUUSD=X");
+    } catch (e) {
+        console.warn("XAUUSD=X 조회 실패, GC=F(선물)로 대체:", e.message);
+        return fetchByTicker("GC=F");
+    }
 }
 
 async function fetchKisGlobal(key) {
