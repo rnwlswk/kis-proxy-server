@@ -242,17 +242,6 @@ app.get("/api/kis-daily-chart/:ticker", async (req, res) => {
     }
 });
 
-// 주봉(최근 20주, 캔들용 OHLC) - 20주치 확보를 위해 넉넉히 160일 전부터 조회
-app.get("/api/kis-weekly-chart/:ticker", async (req, res) => {
-    try {
-        const sorted = await fetchPeriodChart(req.params.ticker, "W", 160, 20);
-        res.json({ success: true, data: sorted });
-    } catch (err) {
-        console.error(err.response?.data || err.message);
-        res.status(500).json({ success: false, error: "주봉 조회 실패" });
-    }
-});
-
 // =========================
 // 배당 API - 최신 회차와 그 직전 회차를 같이 내려줘서, 프론트에서 증감(상승/하락)을 비교할 수 있게 함
 // =========================
