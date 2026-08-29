@@ -180,6 +180,61 @@ app.get("/api/kis-52week/:ticker", async (req, res) => {
 });
 
 // =========================
+// 일봉(최근 N일 종가) API - 한 번 호출에 최대 100건까지 가능해서 페이지네이션 없이 한 번에 받아옴
+// ETF/금현물 전부 KRX 상장 종목이라 이 일반 주식 기간별시세 API로 조회 가능
+// =========================
+app.get("/api/kis-daily-chart/:ticker", async (req, res) => {
+    try {
+        const ticker = req.params.ticker;
+        const token = await getAccessToken();
+
+        const today = new Date();
+        const fortyDaysAgo = new Date();
+        fortyDaysAgo.setDate(today.getDate() - 40); // 주말/공휴일 감안해서 여유있게 40일 전부터 조회
+
+        const format = (d) =>
+            d.getFullYear() +
+            String(d.getMonth() + 1).padStart(2, "0") +
+            String(d.getDate()).padStart(2, "0");
+
+        const response = await callKisThrottled(() => axios.get(
+            `${BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice`,
+            {
+                headers: {
+                    "content-type": "application/json; charset=utf-8",
+                    authorization: `Bearer ${token}`,
+                    appkey: APP_KEY,
+                    appsecret: APP_SECRET,
+                    tr_id: "FHKST03010100"
+                },
+                params: {
+                    FID_COND_MRKT_DIV_CODE: "J",
+                    FID_INPUT_ISCD: ticker,
+                    FID_INPUT_DATE_1: format(fortyDaysAgo),
+                    FID_INPUT_DATE_2: format(today),
+                    FID_PERIOD_DIV_CODE: "D",
+                    FID_ORG_ADJ_PRC: "0"
+                }
+            }
+        ));
+
+        const list = Array.isArray(response.data.output2) ? response.data.output2 : [];
+        // 오래된 날짜 -> 최신 날짜 순으로 정렬, 최근 20거래일만 사용
+        const sorted = [...list]
+            .filter(item => item.stck_bsop_date && item.stck_clpr)
+            .sort((a, b) => a.stck_bsop_date.localeCompare(b.stck_bsop_date))
+            .slice(-20)
+            .map(item => ({ date: item.stck_bsop_date, close: parseFloat(item.stck_clpr) }));
+
+        res.json({ success: true, data: sorted });
+
+    } catch (err) {
+        console.error(err.response?.data || err.message);
+        res.status(500).json({ success: false, error: "일봉 조회 실패" });
+    }
+});
+
+// =========================
 // 배당 API - 최신 회차와 그 직전 회차를 같이 내려줘서, 프론트에서 증감(상승/하락)을 비교할 수 있게 함
 // =========================
 app.get("/api/kis-dividend/:ticker", async (req, res) => {
