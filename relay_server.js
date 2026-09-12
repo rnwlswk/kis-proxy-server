@@ -291,8 +291,13 @@ app.get("/api/kis-dividend/:ticker", async (req, res) => {
 
         const latest = sorted[0] || null;
         const previous = sorted[1] || null;
+        // 최근 1년 전체 분배 이력 (날짜/금액만 간단히 정리해서 반환)
+        const history = sorted.map(item => ({
+            date: item.record_date,
+            amount: parseInt(item.per_sto_divi_amt) || 0
+        }));
 
-        res.json({ success: true, data: latest, previousData: previous });
+        res.json({ success: true, data: latest, previousData: previous, history });
 
     } catch (err) {
         console.error("배당 API 오류", err.response?.data || err.message);
