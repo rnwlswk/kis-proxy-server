@@ -428,6 +428,155 @@ app.get("/api/global/:key", async (req, res) => {
     }
 });
 
+// =========================
+// 글로벌 지수/환율/금 일봉(OHLC) API - 첫 페이지(글로벌 지수 슬라이드)에서 항목을 누르면
+// 기존 ETF 상세화면과 동일한 일봉 차트 모달을 띄우기 위해 사용
+// =========================
+
+// 국내 지수(코스피) 일봉 - inquire-daily-itemchartprice와 동일한 파라미터 구조지만
+// 종목이 아닌 "지수"용 전용 엔드포인트(inquire-daily-indexchartprice)를 사용
+async function fetchDomesticIndexDailyChart(iscd, daysBack, limitCount) {
+    const token = await getAccessToken();
+
+    const today = new Date();
+    const startDate = new Date();
+    startDate.setDate(today.getDate() - daysBack);
+
+    const format = (d) =>
+        d.getFullYear() +
+        String(d.getMonth() + 1).padStart(2, "0") +
+        String(d.getDate()).padStart(2, "0");
+
+    const response = await callKisThrottled(() => axios.get(
+        `${BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice`,
+        {
+            headers: {
+                "content-type": "application/json; charset=utf-8",
+                authorization: `Bearer ${token}`,
+                appkey: APP_KEY,
+                appsecret: APP_SECRET,
+                tr_id: "FHPUP02120000"
+            },
+            params: {
+                FID_COND_MRKT_DIV_CODE: "U",
+                FID_INPUT_ISCD: iscd,
+                FID_INPUT_DATE_1: format(startDate),
+                FID_INPUT_DATE_2: format(today),
+                FID_PERIOD_DIV_CODE: "D"
+            }
+        }
+    ));
+
+    const list = Array.isArray(response.data.output2) ? response.data.output2 : [];
+    return [...list]
+        .filter(item => item.stck_bsop_date && item.bstp_nmix_prpr)
+        .sort((a, b) => a.stck_bsop_date.localeCompare(b.stck_bsop_date))
+        .slice(-limitCount)
+        .map(item => ({
+            date: item.stck_bsop_date,
+            open: parseFloat(item.bstp_nmix_oprc),
+            high: parseFloat(item.bstp_nmix_hgpr),
+            low: parseFloat(item.bstp_nmix_lwpr),
+            close: parseFloat(item.bstp_nmix_prpr)
+        }));
+}
+
+// 해외지수/환율 일봉 - fetchOverseasIndexLike(현재가 조회)와 같은 시세 패밀리의 일별 차트 엔드포인트
+async function fetchOverseasDailyChart(mrktDivCode, iscd, daysBack, limitCount) {
+    const headers = await buildKisHeaders();
+
+    const today = new Date();
+    const startDate = new Date();
+    startDate.setDate(today.getDate() - daysBack);
+
+    const format = (d) =>
+        d.getFullYear() +
+        String(d.getMonth() + 1).padStart(2, "0") +
+        String(d.getDate()).padStart(2, "0");
+
+    const response = await callKisThrottled(() => axios.get(
+        `${BASE_URL}/uapi/overseas-price/v1/quotations/inquire-daily-chartprice`,
+        {
+            headers: { ...headers, tr_id: "FHKST03030100" },
+            params: {
+                FID_COND_MRKT_DIV_CODE: mrktDivCode,
+                FID_INPUT_ISCD: iscd,
+                FID_INPUT_DATE_1: format(startDate),
+                FID_INPUT_DATE_2: format(today),
+                FID_PERIOD_DIV_CODE: "D"
+            }
+        }
+    ));
+
+    const list = Array.isArray(response.data.output2) ? response.data.output2 : [];
+    return [...list]
+        .filter(item => item.stck_bsop_date && item.ovrs_nmix_prpr)
+        .sort((a, b) => a.stck_bsop_date.localeCompare(b.stck_bsop_date))
+        .slice(-limitCount)
+        .map(item => ({
+            date: item.stck_bsop_date,
+            open: parseFloat(item.ovrs_nmix_oprc),
+            high: parseFloat(item.ovrs_nmix_hgpr),
+            low: parseFloat(item.ovrs_nmix_lwpr),
+            close: parseFloat(item.ovrs_nmix_prpr)
+        }));
+}
+
+// 국제 금 일봉 - 야후 파이낸스 COMEX 금선물(GC=F) 일봉 히스토리
+async function fetchGoldDailyChartFromYahoo(limitCount) {
+    const response = await axios.get(
+        "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
+        { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+          params: { interval: "1d", range: "2mo" } }
+    );
+    const result = response.data?.chart?.result?.[0];
+    if (!result || !Array.isArray(result.timestamp)) throw new Error("야후 파이낸스 일봉 응답에 데이터가 없습니다.");
+
+    const quote = result.indicators?.quote?.[0] || {};
+    const toYmd = (ts) => {
+        const d = new Date(ts * 1000);
+        return d.getFullYear() +
+            String(d.getMonth() + 1).padStart(2, "0") +
+            String(d.getDate()).padStart(2, "0");
+    };
+
+    return result.timestamp
+        .map((ts, i) => ({
+            date: toYmd(ts),
+            open: quote.open?.[i],
+            high: quote.high?.[i],
+            low: quote.low?.[i],
+            close: quote.close?.[i]
+        }))
+        .filter(c => typeof c.close === "number")
+        .slice(-limitCount);
+}
+
+// key별로 어느 조회 함수를 쓸지 분기
+// us30y(미국 30년 국채금리)는 KIS API에서 일별 히스토리 조회 엔드포인트가 확인되지 않아 현재 미지원
+async function fetchGlobalDailyChart(key) {
+    if (key === "gold") return fetchGoldDailyChartFromYahoo(20);
+    if (key === "kospi") return fetchDomesticIndexDailyChart("0001", 40, 20);
+    if (key === "sp500") return fetchOverseasDailyChart("N", "SPX", 40, 20);
+    if (key === "nasdaq100") return fetchOverseasDailyChart("N", "NDX", 40, 20);
+    if (key === "usdkrw") return fetchOverseasDailyChart("X", "FX@KRW", 40, 20);
+    return null;
+}
+
+app.get("/api/global-daily-chart/:key", async (req, res) => {
+    try {
+        const key = req.params.key;
+        const data = await fetchGlobalDailyChart(key);
+        if (!data) {
+            return res.status(404).json({ success: false, error: "해당 지수는 일봉 차트를 지원하지 않습니다." });
+        }
+        res.json({ success: true, key, data });
+    } catch (err) {
+        console.error(`[글로벌 일봉 오류] ${req.params.key}:`, err.response?.data || err.message);
+        res.status(500).json({ success: false, error: "글로벌 지수 일봉 조회 실패" });
+    }
+});
+
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
