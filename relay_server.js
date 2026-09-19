@@ -256,6 +256,11 @@ function getKstNowHourStr() {
     return `${get("hour")}${get("minute")}${get("second")}`;
 }
 
+const KST_DATE_FMT = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }); // en-CA => "YYYY-MM-DD" 형식
+function getKstTodayYmd() {
+    return KST_DATE_FMT.format(new Date()).replace(/-/g, "");
+}
+
 // "HHMMSS" 문자열에 분 단위로 더하거나 빼기 (초는 00으로 고정)
 function shiftHourStr(hhmmss, deltaMinutes) {
     const h = parseInt(hhmmss.slice(0, 2), 10);
@@ -304,6 +309,8 @@ async function fetchMinuteChartWindow(ticker, hourStr) {
 }
 
 const MARKET_OPEN_HOUR = "090000";
+const MARKET_CLOSE_HOUR = "153000"; // 상한을 안 걸어두면, 장마감 후 조회 시 KIS가 "조회 시각"에 마지막가를 붙여 돌려주는 값이
+                                     // 그대로 필터를 통과해서 볼 때마다 그래프가 계속 늘어나 보이는 버그가 있었음
 
 // 장 시작(09:00)부터 현재 시각까지 필요한 30분 구간들을 미리 계산해서 한꺼번에 병렬로 요청
 // (구간마다 순서대로 기다리면 최대 13번 왕복이 그대로 다 더해져서 느렸음 - KIS 호출 자체는
@@ -326,7 +333,7 @@ async function fetchMinuteChartFull(ticker) {
     const byTime = new Map();
     chunks.flat().forEach(c => byTime.set(c.date, c)); // 구간끼리 겹치는 시각 중복 제거
     return [...byTime.values()]
-        .filter(c => c.date >= MARKET_OPEN_HOUR)
+        .filter(c => c.date >= MARKET_OPEN_HOUR && c.date <= MARKET_CLOSE_HOUR)
         .sort((a, b) => a.date.localeCompare(b.date));
 }
 
@@ -336,7 +343,7 @@ app.get("/api/kis-minute-chart/:ticker", async (req, res) => {
         if (req.query.quick === "1") {
             const chunk = await fetchMinuteChartWindow(req.params.ticker, getKstNowHourStr());
             const data = chunk
-                .filter(c => c.date >= MARKET_OPEN_HOUR)
+                .filter(c => c.date >= MARKET_OPEN_HOUR && c.date <= MARKET_CLOSE_HOUR)
                 .sort((a, b) => a.date.localeCompare(b.date));
             return res.json({ success: true, data, partial: true });
         }
@@ -751,6 +758,49 @@ app.get("/api/global-daily-chart/:key", async (req, res) => {
     } catch (err) {
         console.error(`[글로벌 일봉 오류] ${req.params.key}:`, err.response?.data || err.message);
         res.status(500).json({ success: false, error: "글로벌 지수 일봉 조회 실패" });
+    }
+});
+
+// =========================
+// 국내 휴장일 조회 (chk-holiday) - 요일만으로는 못 거르는 임시공휴일/대체공휴일까지 반영해서
+// 오늘이 실제 개장일인지 판단하는 용도
+// =========================
+async function fetchIsTradingDay(dateStr) {
+    const token = await getAccessToken();
+
+    const response = await callKisThrottled(() => axios.get(
+        `${BASE_URL}/uapi/domestic-stock/v1/quotations/chk-holiday`,
+        {
+            headers: {
+                "content-type": "application/json; charset=utf-8",
+                authorization: `Bearer ${token}`,
+                appkey: APP_KEY,
+                appsecret: APP_SECRET,
+                tr_id: "CTCA0903R"
+            },
+            params: {
+                BASS_DT: dateStr,
+                CTX_AREA_NK: "",
+                CTX_AREA_FK: ""
+            }
+        }
+    ));
+
+    const list = Array.isArray(response.data.output) ? response.data.output : [];
+    const today = list.find(item => item.bass_dt === dateStr) || list[0];
+    if (!today) throw new Error("휴장일 조회 응답에 데이터가 없습니다.");
+
+    return today.opnd_yn === "Y"; // 개장일 여부
+}
+
+app.get("/api/is-trading-day", async (req, res) => {
+    try {
+        const dateStr = req.query.date || getKstTodayYmd();
+        const isTradingDay = await fetchIsTradingDay(dateStr);
+        res.json({ success: true, date: dateStr, isTradingDay });
+    } catch (err) {
+        console.error("[휴장일 조회 오류]", err.response?.data || err.message);
+        res.status(500).json({ success: false, error: "휴장일 조회 실패" });
     }
 });
 
