@@ -243,6 +243,104 @@ app.get("/api/kis-daily-chart/:ticker", async (req, res) => {
 });
 
 // =========================
+// 분봉(당일 1분봉, 캔들용 OHLC) - inquire-time-itemchartprice는 한 번 호출에 최근 시각 기준으로
+// 최대 30건까지만 내려주므로(다른 KIS 차트류 API보다 더 적음), 장 시작(09:00)까지 여러 번 나눠 호출해서 합침
+// =========================
+const KST_TIME_FMT = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Seoul", hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit"
+});
+
+function getKstNowHourStr() {
+    const parts = KST_TIME_FMT.formatToParts(new Date());
+    const get = (type) => parts.find(p => p.type === type).value;
+    return `${get("hour")}${get("minute")}${get("second")}`;
+}
+
+// "HHMMSS" 문자열에 분 단위로 더하거나 빼기 (초는 00으로 고정)
+function shiftHourStr(hhmmss, deltaMinutes) {
+    const h = parseInt(hhmmss.slice(0, 2), 10);
+    const m = parseInt(hhmmss.slice(2, 4), 10);
+    let totalMinutes = h * 60 + m + deltaMinutes;
+    totalMinutes = Math.max(0, totalMinutes);
+    const newH = Math.floor(totalMinutes / 60);
+    const newM = totalMinutes % 60;
+    return `${String(newH).padStart(2, "0")}${String(newM).padStart(2, "0")}00`;
+}
+
+// 한 구간(윈도우) 조회 - 주어진 시각을 기준으로 그 이전 최대 30분치를 최신순으로 내려줌
+async function fetchMinuteChartWindow(ticker, hourStr) {
+    const token = await getAccessToken();
+
+    const response = await callKisThrottled(() => axios.get(
+        `${BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice`,
+        {
+            headers: {
+                "content-type": "application/json; charset=utf-8",
+                authorization: `Bearer ${token}`,
+                appkey: APP_KEY,
+                appsecret: APP_SECRET,
+                tr_id: "FHKST03010200"
+            },
+            params: {
+                FID_ETC_CLS_CODE: "",
+                FID_COND_MRKT_DIV_CODE: "J",
+                FID_INPUT_ISCD: ticker,
+                FID_INPUT_HOUR_1: hourStr,
+                FID_PW_DATA_INCU_YN: "Y"
+            }
+        }
+    ));
+
+    const list = Array.isArray(response.data.output2) ? response.data.output2 : [];
+    return list
+        .filter(item => item.stck_cntg_hour && item.stck_prpr)
+        .map(item => ({
+            date: item.stck_cntg_hour, // "HHMMSS" - generateCandleChartSvg의 fmtDate가 6자리는 "HH:MM"으로 표시
+            open: parseFloat(item.stck_oprc),
+            high: parseFloat(item.stck_hgpr),
+            low: parseFloat(item.stck_lwpr),
+            close: parseFloat(item.stck_prpr)
+        }));
+}
+
+const MARKET_OPEN_HOUR = "090000";
+
+// 장 시작(09:00)까지 30분 구간씩 거꾸로 페이지네이션해서 당일 1분봉 전체를 합침
+async function fetchMinuteChartFull(ticker) {
+    let collected = [];
+    let cursor = getKstNowHourStr();
+
+    for (let i = 0; i < 20; i++) { // 390분 / 30분 ≈ 13회 + 여유분, 무한루프 방지용 상한
+        const chunk = await fetchMinuteChartWindow(ticker, cursor);
+        if (chunk.length === 0) break;
+        collected = collected.concat(chunk);
+
+        const earliest = chunk[chunk.length - 1].date; // 최신순으로 내려오므로 마지막이 가장 이른 시각
+        if (earliest <= MARKET_OPEN_HOUR) break;
+
+        const nextCursor = shiftHourStr(earliest, -1);
+        if (nextCursor >= cursor) break; // 더 과거로 못 가면 중단 (무한루프 방지)
+        cursor = nextCursor;
+    }
+
+    const byTime = new Map();
+    collected.forEach(c => byTime.set(c.date, c)); // 구간 경계 중복 제거
+    return [...byTime.values()]
+        .filter(c => c.date >= MARKET_OPEN_HOUR)
+        .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+app.get("/api/kis-minute-chart/:ticker", async (req, res) => {
+    try {
+        const data = await fetchMinuteChartFull(req.params.ticker);
+        res.json({ success: true, data });
+    } catch (err) {
+        console.error(`[분봉 오류] ${req.params.ticker}:`, err.response?.data || err.message);
+        res.status(500).json({ success: false, error: "분봉 조회 실패" });
+    }
+});
+
+// =========================
 // 배당 API - 최신 회차와 그 직전 회차를 같이 내려줘서, 프론트에서 증감(상승/하락)을 비교할 수 있게 함
 // =========================
 app.get("/api/kis-dividend/:ticker", async (req, res) => {
