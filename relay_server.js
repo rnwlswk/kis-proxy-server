@@ -433,19 +433,11 @@ app.get("/api/global/:key", async (req, res) => {
 // 기존 ETF 상세화면과 동일한 일봉 차트 모달을 띄우기 위해 사용
 // =========================
 
-// 국내 지수(코스피) 일봉 - inquire-daily-itemchartprice와 동일한 파라미터 구조지만
+// 국내 지수(코스피) 일봉 - 한 구간(윈도우) 조회
+// inquire-daily-itemchartprice와 동일한 파라미터 구조지만
 // 종목이 아닌 "지수"용 전용 엔드포인트(inquire-daily-indexchartprice)를 사용
-async function fetchDomesticIndexDailyChart(iscd, daysBack, limitCount) {
+async function fetchDomesticIndexDailyChartWindow(iscd, startDate, endDate) {
     const token = await getAccessToken();
-
-    const today = new Date();
-    const startDate = new Date();
-    startDate.setDate(today.getDate() - daysBack);
-
-    const format = (d) =>
-        d.getFullYear() +
-        String(d.getMonth() + 1).padStart(2, "0") +
-        String(d.getDate()).padStart(2, "0");
 
     const response = await callKisThrottled(() => axios.get(
         `${BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice`,
@@ -460,18 +452,16 @@ async function fetchDomesticIndexDailyChart(iscd, daysBack, limitCount) {
             params: {
                 FID_COND_MRKT_DIV_CODE: "U",
                 FID_INPUT_ISCD: iscd,
-                FID_INPUT_DATE_1: format(startDate),
-                FID_INPUT_DATE_2: format(today),
+                FID_INPUT_DATE_1: formatYmd(startDate),
+                FID_INPUT_DATE_2: formatYmd(endDate),
                 FID_PERIOD_DIV_CODE: "D"
             }
         }
     ));
 
     const list = Array.isArray(response.data.output2) ? response.data.output2 : [];
-    return [...list]
+    return list
         .filter(item => item.stck_bsop_date && item.bstp_nmix_prpr)
-        .sort((a, b) => a.stck_bsop_date.localeCompare(b.stck_bsop_date))
-        .slice(-limitCount)
         .map(item => ({
             date: item.stck_bsop_date,
             open: parseFloat(item.bstp_nmix_oprc),
@@ -481,18 +471,10 @@ async function fetchDomesticIndexDailyChart(iscd, daysBack, limitCount) {
         }));
 }
 
-// 해외지수/환율 일봉 - fetchOverseasIndexLike(현재가 조회)와 같은 시세 패밀리의 일별 차트 엔드포인트
-async function fetchOverseasDailyChart(mrktDivCode, iscd, daysBack, limitCount) {
+// 해외지수/환율 일봉 - 한 구간(윈도우) 조회
+// fetchOverseasIndexLike(현재가 조회)와 같은 시세 패밀리의 일별 차트 엔드포인트
+async function fetchOverseasDailyChartWindow(mrktDivCode, iscd, startDate, endDate) {
     const headers = await buildKisHeaders();
-
-    const today = new Date();
-    const startDate = new Date();
-    startDate.setDate(today.getDate() - daysBack);
-
-    const format = (d) =>
-        d.getFullYear() +
-        String(d.getMonth() + 1).padStart(2, "0") +
-        String(d.getDate()).padStart(2, "0");
 
     const response = await callKisThrottled(() => axios.get(
         `${BASE_URL}/uapi/overseas-price/v1/quotations/inquire-daily-chartprice`,
@@ -501,18 +483,16 @@ async function fetchOverseasDailyChart(mrktDivCode, iscd, daysBack, limitCount) 
             params: {
                 FID_COND_MRKT_DIV_CODE: mrktDivCode,
                 FID_INPUT_ISCD: iscd,
-                FID_INPUT_DATE_1: format(startDate),
-                FID_INPUT_DATE_2: format(today),
+                FID_INPUT_DATE_1: formatYmd(startDate),
+                FID_INPUT_DATE_2: formatYmd(endDate),
                 FID_PERIOD_DIV_CODE: "D"
             }
         }
     ));
 
     const list = Array.isArray(response.data.output2) ? response.data.output2 : [];
-    return [...list]
+    return list
         .filter(item => item.stck_bsop_date && item.ovrs_nmix_prpr)
-        .sort((a, b) => a.stck_bsop_date.localeCompare(b.stck_bsop_date))
-        .slice(-limitCount)
         .map(item => ({
             date: item.stck_bsop_date,
             open: parseFloat(item.ovrs_nmix_oprc),
@@ -522,12 +502,60 @@ async function fetchOverseasDailyChart(mrktDivCode, iscd, daysBack, limitCount) 
         }));
 }
 
+const formatYmd = (d) =>
+    d.getFullYear() +
+    String(d.getMonth() + 1).padStart(2, "0") +
+    String(d.getDate()).padStart(2, "0");
+
+// 공통 페이지네이션 헬퍼 - KIS 지수/환율 일별차트 API는 한 번 호출에 최대 ~100건까지만
+// 내려주므로(ETF 일봉 API와 동일 계열), 1년치처럼 긴 구간은 최근 날짜부터 거꾸로
+// windowDays(기본 90일)씩 여러 번 나눠 호출해 병합한다.
+async function fetchWithDateWindows(fetchWindowFn, totalDaysBack, limitCount, windowDays = 90) {
+    let collected = [];
+    let cursor = new Date();
+    let daysRemaining = totalDaysBack;
+
+    while (daysRemaining > 0) {
+        const span = Math.min(windowDays, daysRemaining);
+        const endDate = new Date(cursor);
+        const startDate = new Date(cursor);
+        startDate.setDate(startDate.getDate() - span);
+
+        const chunk = await fetchWindowFn(startDate, endDate);
+        if (chunk.length === 0) break; // 더 과거로 가도 데이터가 없으면 중단
+        collected = collected.concat(chunk);
+
+        cursor = startDate;
+        daysRemaining -= span;
+    }
+
+    const byDate = new Map();
+    collected.forEach(c => byDate.set(c.date, c)); // 구간 경계에서 겹치는 날짜 중복 제거
+    return [...byDate.values()]
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .slice(-limitCount);
+}
+
+async function fetchDomesticIndexDailyChart(iscd, daysBack, limitCount) {
+    return fetchWithDateWindows(
+        (start, end) => fetchDomesticIndexDailyChartWindow(iscd, start, end),
+        daysBack, limitCount
+    );
+}
+
+async function fetchOverseasDailyChart(mrktDivCode, iscd, daysBack, limitCount) {
+    return fetchWithDateWindows(
+        (start, end) => fetchOverseasDailyChartWindow(mrktDivCode, iscd, start, end),
+        daysBack, limitCount
+    );
+}
+
 // 국제 금 일봉 - 야후 파이낸스 COMEX 금선물(GC=F) 일봉 히스토리
-async function fetchGoldDailyChartFromYahoo(limitCount) {
+async function fetchGoldDailyChartFromYahoo(yahooRange, limitCount) {
     const response = await axios.get(
         "https://query1.finance.yahoo.com/v8/finance/chart/GC=F",
         { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-          params: { interval: "1d", range: "2mo" } }
+          params: { interval: "1d", range: yahooRange } }
     );
     const result = response.data?.chart?.result?.[0];
     if (!result || !Array.isArray(result.timestamp)) throw new Error("야후 파이낸스 일봉 응답에 데이터가 없습니다.");
@@ -552,25 +580,67 @@ async function fetchGoldDailyChartFromYahoo(limitCount) {
         .slice(-limitCount);
 }
 
+// 미국 30년 국채금리 일봉 - KIS API에는 금리 과거 일별 조회 엔드포인트가 없어
+// 야후 파이낸스의 30년물 금리 지수(^TYX)를 사용. 야후의 ^TYX/^TNX 값은 관례상
+// 실제 금리의 10배로 표시되므로(예: 실제 4.5% -> 45.00) 10으로 나눠 % 단위로 맞춘다.
+// (배포 후 실제 값 스케일이 맞는지 한 번 확인 필요)
+async function fetchUs30yDailyChartFromYahoo(yahooRange, limitCount) {
+    const response = await axios.get(
+        "https://query1.finance.yahoo.com/v8/finance/chart/%5ETYX",
+        { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+          params: { interval: "1d", range: yahooRange } }
+    );
+    const result = response.data?.chart?.result?.[0];
+    if (!result || !Array.isArray(result.timestamp)) throw new Error("야후 파이낸스 국채금리 일봉 응답에 데이터가 없습니다.");
+
+    const quote = result.indicators?.quote?.[0] || {};
+    const toYmd = (ts) => {
+        const d = new Date(ts * 1000);
+        return d.getFullYear() +
+            String(d.getMonth() + 1).padStart(2, "0") +
+            String(d.getDate()).padStart(2, "0");
+    };
+
+    return result.timestamp
+        .map((ts, i) => ({
+            date: toYmd(ts),
+            open: typeof quote.open?.[i] === "number" ? quote.open[i] / 10 : null,
+            high: typeof quote.high?.[i] === "number" ? quote.high[i] / 10 : null,
+            low: typeof quote.low?.[i] === "number" ? quote.low[i] / 10 : null,
+            close: typeof quote.close?.[i] === "number" ? quote.close[i] / 10 : null
+        }))
+        .filter(c => typeof c.close === "number")
+        .slice(-limitCount);
+}
+
+// 조회 기간 프리셋 - "1m"(기본, 최근 20거래일) / "1y"(최근 1년, 약 250거래일)
+const GLOBAL_CHART_RANGE_PRESETS = {
+    "1m": { daysBack: 40, limitCount: 20, yahooRange: "2mo" },
+    "1y": { daysBack: 380, limitCount: 250, yahooRange: "1y" }
+};
+
 // key별로 어느 조회 함수를 쓸지 분기
-// us30y(미국 30년 국채금리)는 KIS API에서 일별 히스토리 조회 엔드포인트가 확인되지 않아 현재 미지원
-async function fetchGlobalDailyChart(key) {
-    if (key === "gold") return fetchGoldDailyChartFromYahoo(20);
-    if (key === "kospi") return fetchDomesticIndexDailyChart("0001", 40, 20);
-    if (key === "sp500") return fetchOverseasDailyChart("N", "SPX", 40, 20);
-    if (key === "nasdaq100") return fetchOverseasDailyChart("N", "NDX", 40, 20);
-    if (key === "usdkrw") return fetchOverseasDailyChart("X", "FX@KRW", 40, 20);
+async function fetchGlobalDailyChart(key, range) {
+    const preset = GLOBAL_CHART_RANGE_PRESETS[range] || GLOBAL_CHART_RANGE_PRESETS["1m"];
+
+    if (key === "gold") return fetchGoldDailyChartFromYahoo(preset.yahooRange, preset.limitCount);
+    if (key === "us30y") return fetchUs30yDailyChartFromYahoo(preset.yahooRange, preset.limitCount);
+    if (key === "kospi") return fetchDomesticIndexDailyChart("0001", preset.daysBack, preset.limitCount);
+    if (key === "sp500") return fetchOverseasDailyChart("N", "SPX", preset.daysBack, preset.limitCount);
+    if (key === "nasdaq100") return fetchOverseasDailyChart("N", "NDX", preset.daysBack, preset.limitCount);
+    if (key === "usdkrw") return fetchOverseasDailyChart("X", "FX@KRW", preset.daysBack, preset.limitCount);
     return null;
 }
 
 app.get("/api/global-daily-chart/:key", async (req, res) => {
     try {
         const key = req.params.key;
-        const data = await fetchGlobalDailyChart(key);
+        const range = req.query.range === "1y" ? "1y" : "1m";
+        const data = await fetchGlobalDailyChart(key, range);
         if (!data) {
             return res.status(404).json({ success: false, error: "해당 지수는 일봉 차트를 지원하지 않습니다." });
         }
-        res.json({ success: true, key, data });
+        res.json({ success: true, key, range, data });
     } catch (err) {
         console.error(`[글로벌 일봉 오류] ${req.params.key}:`, err.response?.data || err.message);
         res.status(500).json({ success: false, error: "글로벌 지수 일봉 조회 실패" });
