@@ -332,6 +332,15 @@ async function fetchMinuteChartFull(ticker) {
 
 app.get("/api/kis-minute-chart/:ticker", async (req, res) => {
     try {
+        // quick=1: 가장 최근 구간(최대 30분치)만 빠르게 반환 - 프론트에서 먼저 그려서 체감 속도를 높이는 용도
+        if (req.query.quick === "1") {
+            const chunk = await fetchMinuteChartWindow(req.params.ticker, getKstNowHourStr());
+            const data = chunk
+                .filter(c => c.date >= MARKET_OPEN_HOUR)
+                .sort((a, b) => a.date.localeCompare(b.date));
+            return res.json({ success: true, data, partial: true });
+        }
+
         const data = await fetchMinuteChartFull(req.params.ticker);
         res.json({ success: true, data });
     } catch (err) {
