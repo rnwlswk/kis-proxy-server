@@ -1,6 +1,8 @@
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(cors());
@@ -337,6 +339,34 @@ async function fetchMinuteChartFull(ticker) {
         .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+// =========================
+// 분봉 스냅샷 저장 - 당일 분봉이 마감 무렵까지 찬 상태로 조회되면 디스크에 저장해뒀다가,
+// 다음날 09:00 이전(장 시작 전)이나 휴장일에 "마지막 거래일 분봉"으로 대신 보여줄 수 있게 함
+// (KIS 분봉 API 자체는 당일 전용이라 과거 날짜를 직접 조회할 방법이 없어서, 우리가 직접 보관해두는 방식)
+// =========================
+const SNAPSHOT_DIR = path.join(__dirname, "minute-snapshots");
+if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+
+function saveMinuteSnapshot(ticker, data) {
+    try {
+        const snapshot = { date: getKstTodayYmd(), data };
+        fs.writeFileSync(path.join(SNAPSHOT_DIR, `${ticker}.json`), JSON.stringify(snapshot));
+    } catch (e) {
+        console.warn(`[${ticker}] 분봉 스냅샷 저장 실패:`, e.message);
+    }
+}
+
+function loadMinuteSnapshot(ticker) {
+    try {
+        const filePath = path.join(SNAPSHOT_DIR, `${ticker}.json`);
+        if (!fs.existsSync(filePath)) return null;
+        return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    } catch (e) {
+        console.warn(`[${ticker}] 분봉 스냅샷 로드 실패:`, e.message);
+        return null;
+    }
+}
+
 app.get("/api/kis-minute-chart/:ticker", async (req, res) => {
     try {
         // quick=1: 가장 최근 구간(최대 30분치)만 빠르게 반환 - 프론트에서 먼저 그려서 체감 속도를 높이는 용도
@@ -349,11 +379,26 @@ app.get("/api/kis-minute-chart/:ticker", async (req, res) => {
         }
 
         const data = await fetchMinuteChartFull(req.params.ticker);
+
+        // 장 마감 무렵(15:00 이후)까지 찬 데이터면 "완성된 하루치"로 보고 스냅샷 저장
+        if (data.length > 0 && data[data.length - 1].date >= "150000") {
+            saveMinuteSnapshot(req.params.ticker, data);
+        }
+
         res.json({ success: true, data });
     } catch (err) {
         console.error(`[분봉 오류] ${req.params.ticker}:`, err.response?.data || err.message);
         res.status(500).json({ success: false, error: "분봉 조회 실패" });
     }
+});
+
+// 저장해둔 마지막 거래일 분봉 스냅샷 조회 (장 시작 전/휴장일용)
+app.get("/api/kis-minute-chart-snapshot/:ticker", (req, res) => {
+    const snapshot = loadMinuteSnapshot(req.params.ticker);
+    if (!snapshot) {
+        return res.status(404).json({ success: false, error: "저장된 분봉 스냅샷이 없습니다." });
+    }
+    res.json({ success: true, date: snapshot.date, data: snapshot.data });
 });
 
 // =========================
