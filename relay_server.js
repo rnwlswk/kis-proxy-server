@@ -305,26 +305,26 @@ async function fetchMinuteChartWindow(ticker, hourStr) {
 
 const MARKET_OPEN_HOUR = "090000";
 
-// 장 시작(09:00)까지 30분 구간씩 거꾸로 페이지네이션해서 당일 1분봉 전체를 합침
+// 장 시작(09:00)부터 현재 시각까지 필요한 30분 구간들을 미리 계산해서 한꺼번에 병렬로 요청
+// (구간마다 순서대로 기다리면 최대 13번 왕복이 그대로 다 더해져서 느렸음 - KIS 호출 자체는
+// callKisThrottled 큐가 알아서 속도제한 안 걸리게 처리해주므로 병렬로 던져도 안전함)
 async function fetchMinuteChartFull(ticker) {
-    let collected = [];
-    let cursor = getKstNowHourStr();
+    const nowHour = getKstNowHourStr();
 
-    for (let i = 0; i < 20; i++) { // 390분 / 30분 ≈ 13회 + 여유분, 무한루프 방지용 상한
-        const chunk = await fetchMinuteChartWindow(ticker, cursor);
-        if (chunk.length === 0) break;
-        collected = collected.concat(chunk);
-
-        const earliest = chunk[chunk.length - 1].date; // 최신순으로 내려오므로 마지막이 가장 이른 시각
-        if (earliest <= MARKET_OPEN_HOUR) break;
-
-        const nextCursor = shiftHourStr(earliest, -1);
-        if (nextCursor >= cursor) break; // 더 과거로 못 가면 중단 (무한루프 방지)
-        cursor = nextCursor;
+    const cursors = [];
+    let cursor = nowHour;
+    for (let i = 0; i < 20; i++) { // 390분 / 30분 ≈ 13개 + 여유분
+        cursors.push(cursor);
+        if (cursor <= MARKET_OPEN_HOUR) break;
+        cursor = shiftHourStr(cursor, -29); // 29분씩 이동해서 구간 사이에 빈틈이 안 생기게 1분 겹치게 함
     }
 
+    const chunks = await Promise.all(
+        cursors.map(h => fetchMinuteChartWindow(ticker, h).catch(() => []))
+    );
+
     const byTime = new Map();
-    collected.forEach(c => byTime.set(c.date, c)); // 구간 경계 중복 제거
+    chunks.flat().forEach(c => byTime.set(c.date, c)); // 구간끼리 겹치는 시각 중복 제거
     return [...byTime.values()]
         .filter(c => c.date >= MARKET_OPEN_HOUR)
         .sort((a, b) => a.date.localeCompare(b.date));
