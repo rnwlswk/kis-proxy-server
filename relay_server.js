@@ -402,6 +402,58 @@ app.get("/api/kis-minute-chart-snapshot/:ticker", (req, res) => {
 });
 
 // =========================
+// 분봉 스냅샷 자동 저장 - 사용자가 장마감 무렵에 우연히 앱을 열어야만 저장되는 문제를 없애기 위해,
+// 서버가 스스로(또는 외부 트리거로) 장마감 시점에 전 종목 분봉을 한 번 받아서 저장해둔다.
+// index.html의 ETF_DATABASE와 동일한 종목 목록을 여기 따로 유지 (서버는 프론트 코드를 모르므로)
+// =========================
+const AUTO_SNAPSHOT_TICKERS = ["486290", "482730", "476550", "475720", "498410", "329200", "M04020000"];
+
+let lastAutoSnapshotDate = null; // 하루에 한 번만 실행되게 막는 용도
+
+async function runAutoSnapshotNow() {
+    const results = [];
+    for (const ticker of AUTO_SNAPSHOT_TICKERS) {
+        try {
+            const data = await fetchMinuteChartFull(ticker);
+            if (data.length > 0 && data[data.length - 1].date >= "150000") {
+                saveMinuteSnapshot(ticker, data);
+                results.push({ ticker, saved: true, count: data.length });
+            } else {
+                results.push({ ticker, saved: false, reason: "당일 데이터가 아직 마감 무렵까지 안 찼음" });
+            }
+        } catch (e) {
+            console.warn(`[자동 스냅샷 오류] ${ticker}:`, e.response?.data || e.message);
+            results.push({ ticker, saved: false, reason: e.message });
+        }
+    }
+    return results;
+}
+
+// 서버가 켜져 있는 동안 5분마다 체크 - 장마감(15:30) 후 30분 지난 시점(15:35~)에 하루 한 번만 자동 실행
+// (Render 무료 플랜처럼 서버가 잠들 수 있는 환경에서는 이 타이머가 그 시간에 꼭 깨어있다는 보장이 없으므로,
+//  아래의 /api/run-auto-snapshot 엔드포인트를 외부 무료 크론 서비스로 15:35경에 호출하도록 걸어두는 걸 권장)
+setInterval(async () => {
+    const today = getKstTodayYmd();
+    if (getKstNowHourStr() < "153500" || lastAutoSnapshotDate === today) return;
+    lastAutoSnapshotDate = today;
+    console.log(`[자동 스냅샷] ${today} 실행 시작`);
+    const results = await runAutoSnapshotNow();
+    console.log(`[자동 스냅샷] ${today} 완료:`, results);
+}, 5 * 60 * 1000);
+
+// 외부 크론 서비스(cron-job.org 등)로 매일 15:35경 호출하면, 서버가 잠들어 있어도 이 요청 자체가 깨워서 실행시킴
+// ?force=1을 붙이면 하루 중복 실행 방지 없이 즉시 강제 실행 (테스트용)
+app.get("/api/run-auto-snapshot", async (req, res) => {
+    const today = getKstTodayYmd();
+    if (req.query.force !== "1" && lastAutoSnapshotDate === today) {
+        return res.json({ success: true, skipped: true, reason: "오늘 이미 실행됨" });
+    }
+    lastAutoSnapshotDate = today;
+    const results = await runAutoSnapshotNow();
+    res.json({ success: true, date: today, results });
+});
+
+// =========================
 // 배당 API - 최신 회차와 그 직전 회차를 같이 내려줘서, 프론트에서 증감(상승/하락)을 비교할 수 있게 함
 // =========================
 app.get("/api/kis-dividend/:ticker", async (req, res) => {
