@@ -244,6 +244,18 @@ app.get("/api/kis-daily-chart/:ticker", async (req, res) => {
     }
 });
 
+// 주봉(최근 약 1년, 52주치, 캔들용 OHLC) - KIS가 FID_PERIOD_DIV_CODE="W"로 실제 주봉 OHLC를 직접 내려줘서
+// 글로벌 지수 때처럼 일봉을 묶어 근사할 필요 없이, 달력 기준 정확한 주봉을 한 번 호출로 받아옴
+app.get("/api/kis-weekly-chart/:ticker", async (req, res) => {
+    try {
+        const sorted = await fetchPeriodChart(req.params.ticker, "W", 800, 52);
+        res.json({ success: true, data: sorted });
+    } catch (err) {
+        console.error(err.response?.data || err.message);
+        res.status(500).json({ success: false, error: "주봉 조회 실패" });
+    }
+});
+
 // =========================
 // 분봉(당일 1분봉, 캔들용 OHLC) - inquire-time-itemchartprice는 한 번 호출에 최근 시각 기준으로
 // 최대 30건까지만 내려주므로(다른 KIS 차트류 API보다 더 적음), 장 시작(09:00)까지 여러 번 나눠 호출해서 합침
