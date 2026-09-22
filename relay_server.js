@@ -988,62 +988,31 @@ app.get("/api/search-stock", async (req, res) => {
             return res.status(400).json({ success: false, error: "검색어가 필요합니다." });
         }
 
-        const response = await axios.get("https://ac.stock.naver.com/ac", {
+        const response = await axios.get("https://m.stock.naver.com/front-api/search/autoComplete", {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
             params: {
-                q: q.trim(),
-                q_enc: "utf-8",
-                st: 111,
-                frm: "stock",
-                r_lt: 111,
-                t_koreng: 1,
-                r_format: "json",
-                r_enc: "utf-8",
-                r_unicode: 0
+                query: q.trim(),
+                target: "stock,index,marketindicator,coin,ipo"
             }
         });
 
-        // 응답 구조가 보통 { items: [ [ [code, name, market, ...], ... ] ] } 형태로 오는 것으로 알려져 있어서
-        // 최대한 방어적으로 훑어서 [code, name] 쌍을 뽑아냄
-        const rawItems = response.data?.items;
-        const flatCandidates = [];
-        const collect = (node) => {
-            if (Array.isArray(node)) {
-                node.forEach(collect);
-            } else if (node && typeof node === "object") {
-                flatCandidates.push(node);
-            }
-        };
-        if (Array.isArray(rawItems)) collect(rawItems);
-
-        // 배열 형태([code, name, ...])와 객체 형태({cd, nm, ...}) 둘 다 대비
+        // result.items[]에 { code, name, typeName(코스피/코스닥), reutersCode, url } 형태로 옴
+        const items = response.data?.result?.items;
         const results = [];
         const seen = new Set();
 
-        const tryAdd = (code, name) => {
-            if (!code || !name) return;
-            const cleanCode = String(code).trim();
-            const cleanName = String(name).trim();
-            if (!/^[0-9A-Za-z]{6}$/.test(cleanCode)) return; // 국내 6자리 코드만
-            if (seen.has(cleanCode)) return;
-            seen.add(cleanCode);
-            results.push({ code: cleanCode.toUpperCase(), name: cleanName });
-        };
-
-        if (Array.isArray(rawItems)) {
-            const walk = (node) => {
-                if (!Array.isArray(node)) return;
-                if (node.length >= 2 && typeof node[0] === "string" && typeof node[1] === "string") {
-                    tryAdd(node[0], node[1]);
-                    return;
-                }
-                node.forEach(walk);
-            };
-            walk(rawItems);
+        if (Array.isArray(items)) {
+            items.forEach(item => {
+                const code = item?.code;
+                const name = item?.name;
+                if (!code || !name) return;
+                const cleanCode = String(code).trim().toUpperCase();
+                if (!/^[0-9A-Z]{6}$/.test(cleanCode)) return; // 국내 6자리 종목만 (해외/지수/코인 등 제외)
+                if (seen.has(cleanCode)) return;
+                seen.add(cleanCode);
+                results.push({ code: cleanCode, name: String(name).trim() });
+            });
         }
-        flatCandidates.forEach(obj => {
-            tryAdd(obj.cd || obj.code || obj.itemCode, obj.nm || obj.name || obj.itemName);
-        });
 
         res.json({ success: true, results: results.slice(0, 15) });
     } catch (err) {
