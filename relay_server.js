@@ -6,6 +6,7 @@ const path = require("path");
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 const APP_KEY = process.env.KIS_API_KEY;
 const APP_SECRET = process.env.KIS_API_SECRET;
@@ -359,10 +360,26 @@ async function fetchMinuteChartFull(ticker) {
 const SNAPSHOT_DIR = path.join(__dirname, "minute-snapshots");
 if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
 
-function saveMinuteSnapshot(ticker, data) {
+// 오늘 이미 저장된 스냅샷이 있으면 겹치는 시각은 최신 값으로 덮어쓰고, 새로 들어온 시각은 추가해서
+// 하루 동안 여러 번에 걸쳐 부분적으로 받은 데이터를 계속 이어붙여 나간다 (KIS가 롤링 버퍼만 유지해서
+// 한 번에 하루 전체를 못 받아오는 문제를 이렇게 누적으로 우회함)
+function saveMinuteSnapshot(ticker, newData) {
     try {
-        const snapshot = { date: getKstTodayYmd(), data };
-        fs.writeFileSync(path.join(SNAPSHOT_DIR, `${ticker}.json`), JSON.stringify(snapshot));
+        const today = getKstTodayYmd();
+        const filePath = path.join(SNAPSHOT_DIR, `${ticker}.json`);
+        let merged = newData;
+
+        if (fs.existsSync(filePath)) {
+            const existing = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+            if (existing.date === today && Array.isArray(existing.data)) {
+                const byTime = new Map();
+                existing.data.forEach(c => byTime.set(c.date, c));
+                newData.forEach(c => byTime.set(c.date, c));
+                merged = [...byTime.values()].sort((a, b) => a.date.localeCompare(b.date));
+            }
+        }
+
+        fs.writeFileSync(filePath, JSON.stringify({ date: today, data: merged }));
     } catch (e) {
         console.warn(`[${ticker}] 분봉 스냅샷 저장 실패:`, e.message);
     }
@@ -392,8 +409,8 @@ app.get("/api/kis-minute-chart/:ticker", async (req, res) => {
 
         const data = await fetchMinuteChartFull(req.params.ticker);
 
-        // 장 마감 무렵(15:00 이후)까지 찬 데이터면 "완성된 하루치"로 보고 스냅샷 저장
-        if (data.length > 0 && data[data.length - 1].date >= "150000") {
+        // 이 종목을 누군가 볼 때마다, 지금 받아진 만큼을 그날 누적 스냅샷에 합쳐둠 (하루 전체를 채우는 데 도움)
+        if (data.length > 0) {
             saveMinuteSnapshot(req.params.ticker, data);
         }
 
@@ -416,22 +433,60 @@ app.get("/api/kis-minute-chart-snapshot/:ticker", (req, res) => {
 // =========================
 // 분봉 스냅샷 자동 저장 - 사용자가 장마감 무렵에 우연히 앱을 열어야만 저장되는 문제를 없애기 위해,
 // 서버가 스스로(또는 외부 트리거로) 장마감 시점에 전 종목 분봉을 한 번 받아서 저장해둔다.
-// index.html의 ETF_DATABASE와 동일한 종목 목록을 여기 따로 유지 (서버는 프론트 코드를 모르므로)
+// 종목 목록은 프론트(index.html)에서 +/- 버튼으로 추가/삭제할 때마다 POST /api/ticker-list로 동기화해줘서 받는다.
+// 아직 한 번도 동기화된 적 없으면(서버 막 재배포된 직후 등) 기본 7종목으로 동작한다.
 // =========================
-const AUTO_SNAPSHOT_TICKERS = ["486290", "482730", "476550", "475720", "498410", "329200", "M04020000"];
+const DEFAULT_TICKERS = ["486290", "482730", "476550", "475720", "498410", "329200", "M04020000"];
+const TICKER_LIST_FILE = path.join(__dirname, "ticker-list.json");
 
-let lastAutoSnapshotDate = null; // 하루에 한 번만 실행되게 막는 용도
+function loadTickerList() {
+    try {
+        if (!fs.existsSync(TICKER_LIST_FILE)) return null;
+        const parsed = JSON.parse(fs.readFileSync(TICKER_LIST_FILE, "utf-8"));
+        return (Array.isArray(parsed) && parsed.length > 0) ? parsed : null;
+    } catch (e) {
+        console.warn("종목 목록 파일 로드 실패:", e.message);
+        return null;
+    }
+}
+
+function saveTickerList(tickers) {
+    try {
+        fs.writeFileSync(TICKER_LIST_FILE, JSON.stringify(tickers));
+    } catch (e) {
+        console.warn("종목 목록 파일 저장 실패:", e.message);
+    }
+}
+
+let currentTickerList = loadTickerList() || DEFAULT_TICKERS;
+
+function getAutoSnapshotTickers() {
+    return currentTickerList;
+}
+
+// 프론트에서 종목을 추가/삭제할 때마다 현재 전체 목록을 통째로 보내서 서버 쪽 목록을 갱신
+app.post("/api/ticker-list", (req, res) => {
+    const tickers = req.body?.tickers;
+    if (!Array.isArray(tickers) || tickers.length === 0) {
+        return res.status(400).json({ success: false, error: "tickers 배열이 필요합니다." });
+    }
+    currentTickerList = tickers.filter(t => typeof t === "string" && t.length > 0);
+    saveTickerList(currentTickerList);
+    res.json({ success: true, count: currentTickerList.length });
+});
+
+let lastAutoSnapshotRunAt = 0; // 마지막 실행 시각(타임스탬프) - 너무 자주 겹쳐 실행되는 것만 방지
 
 async function runAutoSnapshotNow() {
     const results = [];
-    for (const ticker of AUTO_SNAPSHOT_TICKERS) {
+    for (const ticker of getAutoSnapshotTickers()) {
         try {
             const data = await fetchMinuteChartFull(ticker);
-            if (data.length > 0 && data[data.length - 1].date >= "150000") {
-                saveMinuteSnapshot(ticker, data);
+            if (data.length > 0) {
+                saveMinuteSnapshot(ticker, data); // 매번 누적 저장(merge) - 하루치를 여러 번에 나눠 채움
                 results.push({ ticker, saved: true, count: data.length });
             } else {
-                results.push({ ticker, saved: false, reason: "당일 데이터가 아직 마감 무렵까지 안 찼음" });
+                results.push({ ticker, saved: false, reason: "받아온 데이터 없음" });
             }
         } catch (e) {
             console.warn(`[자동 스냅샷 오류] ${ticker}:`, e.response?.data || e.message);
@@ -441,28 +496,37 @@ async function runAutoSnapshotNow() {
     return results;
 }
 
-// 서버가 켜져 있는 동안 5분마다 체크 - 장마감(15:30) 후 30분 지난 시점(15:35~)에 하루 한 번만 자동 실행
-// (Render 무료 플랜처럼 서버가 잠들 수 있는 환경에서는 이 타이머가 그 시간에 꼭 깨어있다는 보장이 없으므로,
-//  아래의 /api/run-auto-snapshot 엔드포인트를 외부 무료 크론 서비스로 15:35경에 호출하도록 걸어두는 걸 권장)
+// 서버가 켜져 있는 동안 5분마다 체크해서, 장중(09:00~15:40)에는 1시간 간격으로 계속 조금씩 받아 누적 저장한다.
+// KIS 분봉 API가 하루 전체가 아니라 최근 일정 시간(추정 3시간 안팎)치만 롤링 버퍼로 유지하는 것으로 보여서,
+// 장마감 시점 한 번만 받으면 이른 아침 데이터가 이미 버퍼에서 빠진 뒤라 못 받아오는 문제가 있었음.
+// 1시간 간격(버퍼 추정 시간보다 짧게)으로 받으면 겹치는 구간이 있어서 빈틈없이 하루 전체가 채워짐.
+// (Render 무료 플랜처럼 서버가 잠들 수 있는 환경에서는 이 타이머가 항상 깨어있다는 보장이 없으므로,
+//  아래의 /api/run-auto-snapshot 엔드포인트를 외부 무료 크론 서비스로 장중에 여러 번 호출하도록 걸어두는 걸 권장)
+const AUTO_SNAPSHOT_WINDOW_START = "085000"; // 장 시작 10분 전부터
+const AUTO_SNAPSHOT_WINDOW_END = "154000";   // 장마감 10분 후까지
+const AUTO_SNAPSHOT_MIN_GAP_MS = 55 * 60 * 1000; // 최소 55분 간격
+
 setInterval(async () => {
+    const nowHour = getKstNowHourStr();
+    if (nowHour < AUTO_SNAPSHOT_WINDOW_START || nowHour > AUTO_SNAPSHOT_WINDOW_END) return;
+    if (Date.now() - lastAutoSnapshotRunAt < AUTO_SNAPSHOT_MIN_GAP_MS) return;
+
+    lastAutoSnapshotRunAt = Date.now();
     const today = getKstTodayYmd();
-    if (getKstNowHourStr() < "153500" || lastAutoSnapshotDate === today) return;
-    lastAutoSnapshotDate = today;
-    console.log(`[자동 스냅샷] ${today} 실행 시작`);
+    console.log(`[자동 스냅샷] ${today} ${nowHour} 실행 시작`);
     const results = await runAutoSnapshotNow();
-    console.log(`[자동 스냅샷] ${today} 완료:`, results);
+    console.log(`[자동 스냅샷] ${today} ${nowHour} 완료:`, results);
 }, 5 * 60 * 1000);
 
-// 외부 크론 서비스(cron-job.org 등)로 매일 15:35경 호출하면, 서버가 잠들어 있어도 이 요청 자체가 깨워서 실행시킴
-// ?force=1을 붙이면 하루 중복 실행 방지 없이 즉시 강제 실행 (테스트용)
+// 외부 크론 서비스(cron-job.org 등)로 장중에 여러 번(예: 매시 정각) 호출하면, 서버가 잠들어 있어도
+// 이 요청 자체가 깨워서 실행시킴. ?force=1을 붙이면 간격 제한 없이 즉시 강제 실행 (테스트용)
 app.get("/api/run-auto-snapshot", async (req, res) => {
-    const today = getKstTodayYmd();
-    if (req.query.force !== "1" && lastAutoSnapshotDate === today) {
-        return res.json({ success: true, skipped: true, reason: "오늘 이미 실행됨" });
+    if (req.query.force !== "1" && Date.now() - lastAutoSnapshotRunAt < AUTO_SNAPSHOT_MIN_GAP_MS) {
+        return res.json({ success: true, skipped: true, reason: "최근에 이미 실행됨" });
     }
-    lastAutoSnapshotDate = today;
+    lastAutoSnapshotRunAt = Date.now();
     const results = await runAutoSnapshotNow();
-    res.json({ success: true, date: today, results });
+    res.json({ success: true, date: getKstTodayYmd(), results });
 });
 
 // =========================
