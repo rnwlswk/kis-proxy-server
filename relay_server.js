@@ -363,12 +363,13 @@ if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR, { recursive: true }
 // 오늘 이미 저장된 스냅샷이 있으면 겹치는 시각은 최신 값으로 덮어쓰고, 새로 들어온 시각은 추가해서
 // 하루 동안 여러 번에 걸쳐 부분적으로 받은 데이터를 계속 이어붙여 나간다 (KIS가 롤링 버퍼만 유지해서
 // 한 번에 하루 전체를 못 받아오는 문제를 이렇게 누적으로 우회함)
+// 병합된 하루 누적 데이터를 반환한다 (호출부에서 "오늘 지금까지 쌓인 전체"를 바로 쓸 수 있게)
 function saveMinuteSnapshot(ticker, newData) {
-    try {
-        const today = getKstTodayYmd();
-        const filePath = path.join(SNAPSHOT_DIR, `${ticker}.json`);
-        let merged = newData;
+    const today = getKstTodayYmd();
+    const filePath = path.join(SNAPSHOT_DIR, `${ticker}.json`);
+    let merged = newData;
 
+    try {
         if (fs.existsSync(filePath)) {
             const existing = JSON.parse(fs.readFileSync(filePath, "utf-8"));
             if (existing.date === today && Array.isArray(existing.data)) {
@@ -383,6 +384,8 @@ function saveMinuteSnapshot(ticker, newData) {
     } catch (e) {
         console.warn(`[${ticker}] 분봉 스냅샷 저장 실패:`, e.message);
     }
+
+    return merged;
 }
 
 function loadMinuteSnapshot(ticker) {
@@ -407,11 +410,20 @@ app.get("/api/kis-minute-chart/:ticker", async (req, res) => {
             return res.json({ success: true, data, partial: true });
         }
 
-        const data = await fetchMinuteChartFull(req.params.ticker);
+        const freshData = await fetchMinuteChartFull(req.params.ticker);
 
-        // 이 종목을 누군가 볼 때마다, 지금 받아진 만큼을 그날 누적 스냅샷에 합쳐둠 (하루 전체를 채우는 데 도움)
-        if (data.length > 0) {
-            saveMinuteSnapshot(req.params.ticker, data);
+        // KIS 분봉 API가 실제로는 (요청 시각과 무관하게) 현재 시각 기준 최근 3시간 안팎의
+        // 롤링 버퍼만 내려주기 때문에, 지금 막 받아온 freshData만으로는 09:00부터를 보여줄 수 없다.
+        // 그래서 지금 받아온 조각을 그날 누적 스냅샷에 병합하고, "병합된 하루 전체"를 응답으로 내려준다.
+        // (스냅샷이 그동안 자동/수동 조회로 09:00~현재까지 빈틈없이 쌓여있었다면 여기서 온전한 하루치가 나옴)
+        let data = freshData;
+        if (freshData.length > 0) {
+            data = saveMinuteSnapshot(req.params.ticker, freshData);
+        } else {
+            const existing = loadMinuteSnapshot(req.params.ticker);
+            if (existing && existing.date === getKstTodayYmd() && Array.isArray(existing.data)) {
+                data = existing.data;
+            }
         }
 
         res.json({ success: true, data });
