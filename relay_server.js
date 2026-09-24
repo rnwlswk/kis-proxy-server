@@ -147,34 +147,78 @@ app.get("/api/kis-data/:ticker", async (req, res) => {
 // =========================
 // 52주 최고/최저가 API (ETF도 KRX 상장종목이라 이 일반 주식현재가 API로 조회 가능)
 // =========================
+// =========================
+// 배당/52주 일일 캐시 - 장중에 자주 안 바뀌는 데이터라서, 종목당 요청마다 KIS를 부르는 대신
+// 하루에 한 번(장 시작 전)만 받아서 디스크에 캐시해두고, 그 이후 요청은 캐시를 즉시 돌려준다.
+// (당일 캐시가 없는 종목 - 방금 추가한 커스텀 종목 등 - 은 요청 시점에 바로 받아와서 캐시에 채워넣음)
+// =========================
+const DAILY_INFO_DIR = path.join(__dirname, "daily-info-cache");
+if (!fs.existsSync(DAILY_INFO_DIR)) fs.mkdirSync(DAILY_INFO_DIR, { recursive: true });
+
+function loadDailyInfoCache(ticker) {
+    try {
+        const filePath = path.join(DAILY_INFO_DIR, `${ticker}.json`);
+        if (!fs.existsSync(filePath)) return null;
+        return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    } catch (e) {
+        console.warn(`[${ticker}] 배당/52주 캐시 로드 실패:`, e.message);
+        return null;
+    }
+}
+
+// 오늘 날짜 캐시가 아니면(날짜가 바뀌었으면) 새로 시작하고, 같은 날이면 필드만 덮어써서 합침
+// (배당/52주를 따로따로 갱신해도 서로의 값을 지우지 않도록)
+function saveDailyInfoCache(ticker, partial) {
+    try {
+        const today = getKstTodayYmd();
+        const filePath = path.join(DAILY_INFO_DIR, `${ticker}.json`);
+        let existing = loadDailyInfoCache(ticker);
+        if (!existing || existing.date !== today) existing = { date: today };
+        const merged = { ...existing, date: today, ...partial };
+        fs.writeFileSync(filePath, JSON.stringify(merged));
+        return merged;
+    } catch (e) {
+        console.warn(`[${ticker}] 배당/52주 캐시 저장 실패:`, e.message);
+        return null;
+    }
+}
+
+async function fetch52WeekRaw(ticker) {
+    const token = await getAccessToken();
+
+    const response = await callKisThrottled(() => axios.get(
+        `${BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price`,
+        {
+            headers: {
+                "content-type": "application/json; charset=utf-8",
+                authorization: `Bearer ${token}`,
+                appkey: APP_KEY,
+                appsecret: APP_SECRET,
+                tr_id: "FHKST01010100"
+            },
+            params: {
+                FID_COND_MRKT_DIV_CODE: "J",
+                FID_INPUT_ISCD: ticker
+            }
+        }
+    ));
+
+    const o = response.data.output || {};
+    return { w52_hgpr: o.w52_hgpr, w52_lwpr: o.w52_lwpr };
+}
+
 app.get("/api/kis-52week/:ticker", async (req, res) => {
     try {
         const ticker = req.params.ticker;
-        const token = await getAccessToken();
+        const today = getKstTodayYmd();
+        const cached = loadDailyInfoCache(ticker);
+        if (cached && cached.date === today && cached.week52) {
+            return res.json({ success: true, w52_hgpr: cached.week52.w52_hgpr, w52_lwpr: cached.week52.w52_lwpr, cached: true });
+        }
 
-        const response = await callKisThrottled(() => axios.get(
-            `${BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price`,
-            {
-                headers: {
-                    "content-type": "application/json; charset=utf-8",
-                    authorization: `Bearer ${token}`,
-                    appkey: APP_KEY,
-                    appsecret: APP_SECRET,
-                    tr_id: "FHKST01010100"
-                },
-                params: {
-                    FID_COND_MRKT_DIV_CODE: "J",
-                    FID_INPUT_ISCD: ticker
-                }
-            }
-        ));
-
-        const o = response.data.output || {};
-        res.json({
-            success: true,
-            w52_hgpr: o.w52_hgpr,
-            w52_lwpr: o.w52_lwpr
-        });
+        const week52 = await fetch52WeekRaw(ticker);
+        saveDailyInfoCache(ticker, { week52 });
+        res.json({ success: true, w52_hgpr: week52.w52_hgpr, w52_lwpr: week52.w52_lwpr });
 
     } catch (err) {
         console.error(err.response?.data || err.message);
@@ -247,9 +291,22 @@ app.get("/api/kis-daily-chart/:ticker", async (req, res) => {
 
 // 주봉(최근 약 1년, 52주치, 캔들용 OHLC) - KIS가 FID_PERIOD_DIV_CODE="W"로 실제 주봉 OHLC를 직접 내려줘서
 // 글로벌 지수 때처럼 일봉을 묶어 근사할 필요 없이, 달력 기준 정확한 주봉을 한 번 호출로 받아옴
+// 이번 주 캔들 빼곤 거의 안 바뀌는 데이터라서, 배당/52주와 같은 당일 캐시(daily-info-cache)를 공유해서 쓴다.
+async function fetchWeeklyChartRaw(ticker) {
+    return fetchPeriodChart(ticker, "W", 800, 52);
+}
+
 app.get("/api/kis-weekly-chart/:ticker", async (req, res) => {
     try {
-        const sorted = await fetchPeriodChart(req.params.ticker, "W", 800, 52);
+        const ticker = req.params.ticker;
+        const today = getKstTodayYmd();
+        const cached = loadDailyInfoCache(ticker);
+        if (cached && cached.date === today && Array.isArray(cached.weeklyChart) && cached.weeklyChart.length >= 2) {
+            return res.json({ success: true, data: cached.weeklyChart, cached: true });
+        }
+
+        const sorted = await fetchWeeklyChartRaw(ticker);
+        saveDailyInfoCache(ticker, { weeklyChart: sorted });
         res.json({ success: true, data: sorted });
     } catch (err) {
         console.error(err.response?.data || err.message);
@@ -544,64 +601,160 @@ app.get("/api/run-auto-snapshot", async (req, res) => {
 // =========================
 // 배당 API - 최신 회차와 그 직전 회차를 같이 내려줘서, 프론트에서 증감(상승/하락)을 비교할 수 있게 함
 // =========================
+async function fetchDividendRaw(ticker) {
+    const token = await getAccessToken();
+
+    const today = new Date();
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(today.getFullYear() - 1);
+
+    const format = (d) =>
+        d.getFullYear() +
+        String(d.getMonth() + 1).padStart(2, "0") +
+        String(d.getDate()).padStart(2, "0");
+
+    const response = await callKisThrottled(() => axios.get(
+        `${BASE_URL}/uapi/domestic-stock/v1/ksdinfo/dividend`,
+        {
+            headers: {
+                "content-type": "application/json; charset=utf-8",
+                authorization: `Bearer ${token}`,
+                appkey: APP_KEY,
+                appsecret: APP_SECRET,
+                tr_id: "HHKDB669102C0",
+                custtype: "P"
+            },
+            params: {
+                CTS: "",
+                GB1: "0",
+                F_DT: format(oneYearAgo),
+                T_DT: format(today),
+                SHT_CD: ticker,
+                HIGH_GB: "0"
+            }
+        }
+    ));
+
+    let sorted = [];
+    if (response.data.output1 && Array.isArray(response.data.output1)) {
+        const filtered = response.data.output1.filter(item => item.sht_cd === ticker);
+        const list = filtered.length > 0 ? filtered : response.data.output1;
+        // record_date(YYYYMMDD) 기준 최신순 정렬
+        sorted = [...list].sort((a, b) => (b.record_date || "").localeCompare(a.record_date || ""));
+    }
+
+    const latest = sorted[0] || null;
+    const previous = sorted[1] || null;
+    // 최근 1년 전체 분배 이력 (날짜/금액만 간단히 정리해서 반환)
+    const history = sorted.map(item => ({
+        date: item.record_date,
+        amount: parseInt(item.per_sto_divi_amt) || 0
+    }));
+
+    return { data: latest, previousData: previous, history };
+}
+
 app.get("/api/kis-dividend/:ticker", async (req, res) => {
     try {
         const ticker = req.params.ticker;
-        const token = await getAccessToken();
-
-        const today = new Date();
-        const oneYearAgo = new Date();
-        oneYearAgo.setFullYear(today.getFullYear() - 1);
-
-        const format = (d) =>
-            d.getFullYear() +
-            String(d.getMonth() + 1).padStart(2, "0") +
-            String(d.getDate()).padStart(2, "0");
-
-        const response = await callKisThrottled(() => axios.get(
-            `${BASE_URL}/uapi/domestic-stock/v1/ksdinfo/dividend`,
-            {
-                headers: {
-                    "content-type": "application/json; charset=utf-8",
-                    authorization: `Bearer ${token}`,
-                    appkey: APP_KEY,
-                    appsecret: APP_SECRET,
-                    tr_id: "HHKDB669102C0",
-                    custtype: "P"
-                },
-                params: {
-                    CTS: "",
-                    GB1: "0",
-                    F_DT: format(oneYearAgo),
-                    T_DT: format(today),
-                    SHT_CD: ticker,
-                    HIGH_GB: "0"
-                }
-            }
-        ));
-
-        let sorted = [];
-        if (response.data.output1 && Array.isArray(response.data.output1)) {
-            const filtered = response.data.output1.filter(item => item.sht_cd === ticker);
-            const list = filtered.length > 0 ? filtered : response.data.output1;
-            // record_date(YYYYMMDD) 기준 최신순 정렬
-            sorted = [...list].sort((a, b) => (b.record_date || "").localeCompare(a.record_date || ""));
+        const today = getKstTodayYmd();
+        const cached = loadDailyInfoCache(ticker);
+        if (cached && cached.date === today && cached.dividend) {
+            return res.json({ success: true, ...cached.dividend, cached: true });
         }
 
-        const latest = sorted[0] || null;
-        const previous = sorted[1] || null;
-        // 최근 1년 전체 분배 이력 (날짜/금액만 간단히 정리해서 반환)
-        const history = sorted.map(item => ({
-            date: item.record_date,
-            amount: parseInt(item.per_sto_divi_amt) || 0
-        }));
-
-        res.json({ success: true, data: latest, previousData: previous, history });
+        const dividend = await fetchDividendRaw(ticker);
+        saveDailyInfoCache(ticker, { dividend });
+        res.json({ success: true, ...dividend });
 
     } catch (err) {
         console.error("배당 API 오류", err.response?.data || err.message);
         res.status(500).json({ success: false, error: err.response?.data || err.message });
     }
+});
+
+// 종목 목록(currentTickerList) 전체에 대해 배당/52주/주봉을 한꺼번에 갱신해서 당일 캐시를 채워둔다.
+// (장 시작 전 자동 트리거 및 외부 크론용 강제 실행 엔드포인트에서 공용으로 사용)
+async function refreshDailyInfoForTicker(ticker) {
+    const isGold = ticker === "M04020000"; // 금현물은 프론트에서 배당/52주는 이 API들로 조회하지 않음(현재가 API에 52주가 같이 옴). 주봉은 금현물도 씀.
+
+    const [dividend, week52, weeklyChart] = await Promise.all([
+        isGold ? Promise.resolve(null) : fetchDividendRaw(ticker).catch(e => {
+            console.warn(`[${ticker}] 배당 사전 갱신 실패:`, e.response?.data || e.message);
+            return null;
+        }),
+        isGold ? Promise.resolve(null) : fetch52WeekRaw(ticker).catch(e => {
+            console.warn(`[${ticker}] 52주 사전 갱신 실패:`, e.response?.data || e.message);
+            return null;
+        }),
+        fetchWeeklyChartRaw(ticker).catch(e => {
+            console.warn(`[${ticker}] 주봉 사전 갱신 실패:`, e.response?.data || e.message);
+            return null;
+        })
+    ]);
+
+    const partial = {};
+    if (dividend) partial.dividend = dividend;
+    if (week52) partial.week52 = week52;
+    if (Array.isArray(weeklyChart) && weeklyChart.length > 0) partial.weeklyChart = weeklyChart;
+    if (Object.keys(partial).length > 0) saveDailyInfoCache(ticker, partial);
+
+    return { dividend: !!dividend, week52: !!week52, weeklyChart: !!(weeklyChart && weeklyChart.length > 0) };
+}
+
+async function runDailyInfoRefreshNow() {
+    const results = [];
+    for (const ticker of getAutoSnapshotTickers()) {
+        try {
+            const r = await refreshDailyInfoForTicker(ticker);
+            results.push({ ticker, ...r });
+        } catch (e) {
+            results.push({ ticker, error: e.message });
+        }
+    }
+    return results;
+}
+
+
+// 서버가 켜져 있는 동안 5분마다 체크해서, 장 시작 전 시간대(07:00~08:55)에 하루 한 번만 실행한다.
+// 배당/52주/주봉(종목별) + 글로벌 지수 일봉·주봉 + 오늘 휴장일 여부까지 한 번에 미리 받아 캐시해둔다.
+// (역시 Render 무료 플랜 등 서버가 잠들 수 있는 환경 대비, /api/run-daily-info-refresh를
+//  외부 무료 크론 서비스로 장 시작 전에 한 번 호출하도록 걸어두는 걸 권장)
+const DAILY_INFO_WINDOW_START = "070000";
+const DAILY_INFO_WINDOW_END = "085500"; // 장 시작(09:00) 5분 전까지
+const DAILY_INFO_MIN_GAP_MS = 20 * 60 * 60 * 1000; // 최소 20시간 간격 (하루 한 번만)
+let lastDailyInfoRunAt = 0;
+
+async function runMorningPrefetch() {
+    const tickerResults = await runDailyInfoRefreshNow();
+    const globalResults = await refreshAllGlobalDailyCharts();
+    const isTradingDay = await getIsTradingDayCached(getKstTodayYmd()).catch(e => {
+        console.warn("휴장일 사전 갱신 실패:", e.response?.data || e.message);
+        return null;
+    });
+    return { tickerResults, globalResults, isTradingDay };
+}
+
+setInterval(async () => {
+    const nowHour = getKstNowHourStr();
+    if (nowHour < DAILY_INFO_WINDOW_START || nowHour > DAILY_INFO_WINDOW_END) return;
+    if (Date.now() - lastDailyInfoRunAt < DAILY_INFO_MIN_GAP_MS) return;
+
+    lastDailyInfoRunAt = Date.now();
+    const today = getKstTodayYmd();
+    console.log(`[장전 캐시 사전 갱신] ${today} 실행 시작`);
+    const results = await runMorningPrefetch();
+    console.log(`[장전 캐시 사전 갱신] ${today} 완료:`, results);
+}, 5 * 60 * 1000);
+
+// 외부 크론 서비스로 장 시작 전에 호출하면 캐시를 미리 채워둠. ?force=1이면 간격 제한 없이 즉시 강제 실행(테스트용)
+app.get("/api/run-daily-info-refresh", async (req, res) => {
+    if (req.query.force !== "1" && Date.now() - lastDailyInfoRunAt < DAILY_INFO_MIN_GAP_MS) {
+        return res.json({ success: true, skipped: true, reason: "최근에 이미 실행됨" });
+    }
+    lastDailyInfoRunAt = Date.now();
+    const results = await runMorningPrefetch();
+    res.json({ success: true, date: getKstTodayYmd(), ...results });
 });
 
 // =========================
@@ -931,14 +1084,68 @@ async function fetchGlobalDailyChart(key, range) {
     return null;
 }
 
+// 글로벌 지수 일봉/주봉 당일 캐시 - "1y" 범위는 구간을 최대 5번 나눠 호출해야 해서 특히 느린데,
+// 이것도 하루에 한 번만 바뀌는 데이터라 배당/52주와 같은 방식으로 장전에 미리 받아 캐시해둔다.
+const GLOBAL_DAILY_DIR = path.join(__dirname, "global-daily-cache");
+if (!fs.existsSync(GLOBAL_DAILY_DIR)) fs.mkdirSync(GLOBAL_DAILY_DIR, { recursive: true });
+const GLOBAL_DAILY_KEYS = ["nasdaq100", "sp500", "us30y", "kospi", "gold", "usdkrw"];
+const GLOBAL_DAILY_RANGES = ["1m", "1y"];
+
+function loadGlobalDailyCache(key, range) {
+    try {
+        const filePath = path.join(GLOBAL_DAILY_DIR, `${key}_${range}.json`);
+        if (!fs.existsSync(filePath)) return null;
+        return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    } catch (e) {
+        console.warn(`[${key}/${range}] 글로벌 일봉 캐시 로드 실패:`, e.message);
+        return null;
+    }
+}
+
+function saveGlobalDailyCache(key, range, data) {
+    try {
+        const filePath = path.join(GLOBAL_DAILY_DIR, `${key}_${range}.json`);
+        fs.writeFileSync(filePath, JSON.stringify({ date: getKstTodayYmd(), data }));
+    } catch (e) {
+        console.warn(`[${key}/${range}] 글로벌 일봉 캐시 저장 실패:`, e.message);
+    }
+}
+
+async function refreshAllGlobalDailyCharts() {
+    const results = [];
+    for (const key of GLOBAL_DAILY_KEYS) {
+        for (const range of GLOBAL_DAILY_RANGES) {
+            try {
+                const data = await fetchGlobalDailyChart(key, range);
+                if (Array.isArray(data) && data.length > 0) {
+                    saveGlobalDailyCache(key, range, data);
+                }
+                results.push({ key, range, count: Array.isArray(data) ? data.length : 0 });
+            } catch (e) {
+                console.warn(`[${key}/${range}] 글로벌 일봉 사전 갱신 실패:`, e.response?.data || e.message);
+                results.push({ key, range, error: e.message });
+            }
+        }
+    }
+    return results;
+}
+
 app.get("/api/global-daily-chart/:key", async (req, res) => {
     try {
         const key = req.params.key;
         const range = req.query.range === "1y" ? "1y" : "1m";
+        const today = getKstTodayYmd();
+
+        const cached = loadGlobalDailyCache(key, range);
+        if (cached && cached.date === today && Array.isArray(cached.data) && cached.data.length > 0) {
+            return res.json({ success: true, key, range, data: cached.data, cached: true });
+        }
+
         const data = await fetchGlobalDailyChart(key, range);
         if (!data) {
             return res.status(404).json({ success: false, error: "해당 지수는 일봉 차트를 지원하지 않습니다." });
         }
+        saveGlobalDailyCache(key, range, data);
         res.json({ success: true, key, range, data });
     } catch (err) {
         console.error(`[글로벌 일봉 오류] ${req.params.key}:`, err.response?.data || err.message);
@@ -978,10 +1185,42 @@ async function fetchIsTradingDay(dateStr) {
     return today.opnd_yn === "Y"; // 개장일 여부
 }
 
+// 휴장일 여부는 특정 날짜에 대해 한 번 알아내면 그날 하루 종일(사실상 영구히) 안 바뀌므로,
+// 날짜별로 디스크에 캐시해서 페이지를 열 때마다 KIS에 다시 물어보지 않도록 한다.
+const TRADING_DAY_CACHE_FILE = path.join(__dirname, "trading-day-cache.json");
+
+function loadTradingDayCache() {
+    try {
+        if (!fs.existsSync(TRADING_DAY_CACHE_FILE)) return {};
+        return JSON.parse(fs.readFileSync(TRADING_DAY_CACHE_FILE, "utf-8"));
+    } catch (e) {
+        console.warn("휴장일 캐시 로드 실패:", e.message);
+        return {};
+    }
+}
+
+function saveTradingDayCache(cache) {
+    try {
+        fs.writeFileSync(TRADING_DAY_CACHE_FILE, JSON.stringify(cache));
+    } catch (e) {
+        console.warn("휴장일 캐시 저장 실패:", e.message);
+    }
+}
+
+async function getIsTradingDayCached(dateStr) {
+    const cache = loadTradingDayCache();
+    if (typeof cache[dateStr] === "boolean") return cache[dateStr];
+
+    const isTradingDay = await fetchIsTradingDay(dateStr);
+    cache[dateStr] = isTradingDay;
+    saveTradingDayCache(cache);
+    return isTradingDay;
+}
+
 app.get("/api/is-trading-day", async (req, res) => {
     try {
         const dateStr = req.query.date || getKstTodayYmd();
-        const isTradingDay = await fetchIsTradingDay(dateStr);
+        const isTradingDay = await getIsTradingDayCached(dateStr);
         res.json({ success: true, date: dateStr, isTradingDay });
     } catch (err) {
         console.error("[휴장일 조회 오류]", err.response?.data || err.message);
